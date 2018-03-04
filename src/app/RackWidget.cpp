@@ -1,35 +1,47 @@
-#include <map>
-#include <algorithm>
 #include "app.hpp"
 #include "engine.hpp"
 #include "plugin.hpp"
-#include "gui.hpp"
+#include "window.hpp"
+#include "settings.hpp"
+#include "asset.hpp"
+#include <map>
+#include <algorithm>
+#include "osdialog.h"
 
 
 namespace rack {
 
 
-struct WireContainer : TransparentWidget {
-	void draw(NVGcontext *vg) {
-		// Wire plugs
+struct ModuleContainer : Widget {
+	void draw(NVGcontext *vg) override {
+		// Draw shadows behind each ModuleWidget first, so the shadow doesn't overlap the front.
 		for (Widget *child : children) {
-			WireWidget *wire = dynamic_cast<WireWidget*>(child);
-			assert(wire);
-			wire->drawPlugs(vg);
+			if (!child->visible)
+				continue;
+			nvgSave(vg);
+			nvgTranslate(vg, child->box.pos.x, child->box.pos.y);
+			ModuleWidget *w = dynamic_cast<ModuleWidget*>(child);
+			w->drawShadow(vg);
+			nvgRestore(vg);
 		}
 
 		Widget::draw(vg);
 	}
 };
 
+
 RackWidget::RackWidget() {
 	rails = new FramebufferWidget();
-	RackRail *rail = new RackRail();
-	rail->box.size = Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT);
-	rails->addChild(rail);
-	rails->box.size = rail->box.size;
+	rails->box.size = Vec();
+	rails->oversample = 1.0;
+	{
+		RackRail *rail = new RackRail();
+		rail->box.size = Vec();
+		rails->addChild(rail);
+	}
+	addChild(rails);
 
-	moduleContainer = new Widget();
+	moduleContainer = new ModuleContainer();
 	addChild(moduleContainer);
 
 	wireContainer = new WireContainer();
@@ -37,35 +49,82 @@ RackWidget::RackWidget() {
 }
 
 RackWidget::~RackWidget() {
-	delete rails;
 }
 
 void RackWidget::clear() {
-	activeWire = NULL;
+	wireContainer->activeWire = NULL;
 	wireContainer->clearChildren();
 	moduleContainer->clearChildren();
+	lastPath = "";
+
+	gRackScene->scrollWidget->offset = Vec(0, 0);
 }
 
-void RackWidget::savePatch(std::string filename) {
-	printf("Saving patch %s\n", filename.c_str());
-	FILE *file = fopen(filename.c_str(), "w");
-	if (!file)
+void RackWidget::reset() {
+	if (osdialog_message(OSDIALOG_INFO, OSDIALOG_OK_CANCEL, "Clear your patch and start over?")) {
+		clear();
+		loadPatch(assetLocal("template.vcv"));
+	}
+}
+
+void RackWidget::openDialog() {
+	std::string dir = lastPath.empty() ? assetLocal("") : extractDirectory(lastPath);
+	char *path = osdialog_file(OSDIALOG_OPEN, dir.c_str(), NULL, NULL);
+	if (path) {
+		loadPatch(path);
+		lastPath = path;
+		free(path);
+	}
+}
+
+void RackWidget::saveDialog() {
+	if (!lastPath.empty()) {
+		savePatch(lastPath);
+	}
+	else {
+		saveAsDialog();
+	}
+}
+
+void RackWidget::saveAsDialog() {
+	std::string dir = lastPath.empty() ? assetLocal("") : extractDirectory(lastPath);
+	char *path = osdialog_file(OSDIALOG_SAVE, dir.c_str(), "Untitled.vcv", NULL);
+
+	if (path) {
+		std::string pathStr = path;
+		free(path);
+		std::string extension = extractExtension(pathStr);
+		if (extension.empty()) {
+			pathStr += ".vcv";
+		}
+
+		savePatch(pathStr);
+		lastPath = pathStr;
+	}
+}
+
+void RackWidget::savePatch(std::string path) {
+	info("Saving patch %s", path.c_str());
+	json_t *rootJ = toJson();
+	if (!rootJ)
 		return;
 
-	json_t *rootJ = toJson();
-	if (rootJ) {
-		json_dumpf(rootJ, file, JSON_INDENT(2));
-		json_decref(rootJ);
+	FILE *file = fopen(path.c_str(), "w");
+	if (file) {
+		json_dumpf(rootJ, file, JSON_INDENT(2) | JSON_REAL_PRECISION(9));
+		fclose(file);
 	}
 
-	fclose(file);
+	json_decref(rootJ);
 }
 
-void RackWidget::loadPatch(std::string filename) {
-	printf("Loading patch %s\n", filename.c_str());
-	FILE *file = fopen(filename.c_str(), "r");
-	if (!file)
+void RackWidget::loadPatch(std::string path) {
+	info("Loading patch %s", path.c_str());
+	FILE *file = fopen(path.c_str(), "r");
+	if (!file) {
+		// Exit silently
 		return;
+	}
 
 	json_error_t error;
 	json_t *rootJ = json_loadf(file, 0, &error);
@@ -75,10 +134,19 @@ void RackWidget::loadPatch(std::string filename) {
 		json_decref(rootJ);
 	}
 	else {
-		printf("JSON parsing error at %s %d:%d %s\n", error.source, error.line, error.column, error.text);
+		std::string message = stringf("JSON parsing error at %s %d:%d %s\n", error.source, error.line, error.column, error.text);
+		osdialog_message(OSDIALOG_WARNING, OSDIALOG_OK, message.c_str());
 	}
 
 	fclose(file);
+}
+
+void RackWidget::revert() {
+	if (lastPath.empty())
+		return;
+	if (osdialog_message(OSDIALOG_INFO, OSDIALOG_OK_CANCEL, "Revert your patch to the last saved state?")) {
+		loadPatch(lastPath);
+	}
 }
 
 json_t *RackWidget::toJson() {
@@ -88,14 +156,6 @@ json_t *RackWidget::toJson() {
 	// version
 	json_t *versionJ = json_string(gApplicationVersion.c_str());
 	json_object_set_new(rootJ, "version", versionJ);
-
-	// wireOpacity
-	json_t *wireOpacityJ = json_real(dynamic_cast<RackScene*>(gScene)->toolbar->wireOpacitySlider->value);
-	json_object_set_new(rootJ, "wireOpacity", wireOpacityJ);
-
-	// wireTension
-	json_t *wireTensionJ = json_real(dynamic_cast<RackScene*>(gScene)->toolbar->wireTensionSlider->value);
-	json_object_set_new(rootJ, "wireTension", wireTensionJ);
 
 	// modules
 	json_t *modulesJ = json_array();
@@ -121,31 +181,26 @@ json_t *RackWidget::toJson() {
 		if (!(wireWidget->outputPort && wireWidget->inputPort))
 			continue;
 		// wire
-		json_t *wire = json_object();
-		{
-			// Get the modules at each end of the wire
-			ModuleWidget *outputModuleWidget = wireWidget->outputPort->getAncestorOfType<ModuleWidget>();
-			assert(outputModuleWidget);
-			int outputModuleId = moduleIds[outputModuleWidget];
+		json_t *wire = wireWidget->toJson();
 
-			ModuleWidget *inputModuleWidget = wireWidget->inputPort->getAncestorOfType<ModuleWidget>();
-			assert(inputModuleWidget);
-			int inputModuleId = moduleIds[inputModuleWidget];
+		// Get the modules at each end of the wire
+		ModuleWidget *outputModuleWidget = wireWidget->outputPort->getAncestorOfType<ModuleWidget>();
+		assert(outputModuleWidget);
+		int outputModuleId = moduleIds[outputModuleWidget];
 
-			// Get output/input ports
-			auto outputIt = std::find(outputModuleWidget->outputs.begin(), outputModuleWidget->outputs.end(), wireWidget->outputPort);
-			assert(outputIt != outputModuleWidget->outputs.end());
-			int outputId = outputIt - outputModuleWidget->outputs.begin();
+		ModuleWidget *inputModuleWidget = wireWidget->inputPort->getAncestorOfType<ModuleWidget>();
+		assert(inputModuleWidget);
+		int inputModuleId = moduleIds[inputModuleWidget];
 
-			auto inputIt = std::find(inputModuleWidget->inputs.begin(), inputModuleWidget->inputs.end(), wireWidget->inputPort);
-			assert(inputIt != inputModuleWidget->inputs.end());
-			int inputId = inputIt - inputModuleWidget->inputs.begin();
+		// Get output/input ports
+		int outputId = wireWidget->outputPort->portId;
+		int inputId = wireWidget->inputPort->portId;
 
-			json_object_set_new(wire, "outputModuleId", json_integer(outputModuleId));
-			json_object_set_new(wire, "outputId", json_integer(outputId));
-			json_object_set_new(wire, "inputModuleId", json_integer(inputModuleId));
-			json_object_set_new(wire, "inputId", json_integer(inputId));
-		}
+		json_object_set_new(wire, "outputModuleId", json_integer(outputModuleId));
+		json_object_set_new(wire, "outputId", json_integer(outputId));
+		json_object_set_new(wire, "inputModuleId", json_integer(inputModuleId));
+		json_object_set_new(wire, "inputId", json_integer(inputId));
+
 		json_array_append_new(wires, wire);
 	}
 	json_object_set_new(rootJ, "wires", wires);
@@ -154,23 +209,26 @@ json_t *RackWidget::toJson() {
 }
 
 void RackWidget::fromJson(json_t *rootJ) {
+	std::string message;
+
 	// version
+	std::string version;
 	json_t *versionJ = json_object_get(rootJ, "version");
 	if (versionJ) {
-		const char *version = json_string_value(versionJ);
-		if (gApplicationVersion != version)
-			printf("JSON version mismatch, attempting to convert JSON version %s to %s\n", version, gApplicationVersion.c_str());
+		version = json_string_value(versionJ);
+		if (!version.empty() && gApplicationVersion != version)
+			message += stringf("This patch was created with Rack %s. Saving it will convert it to a Rack %s patch.\n\n", version.c_str(), gApplicationVersion.c_str());
 	}
 
-	// wireOpacity
-	json_t *wireOpacityJ = json_object_get(rootJ, "wireOpacity");
-	if (wireOpacityJ)
-		dynamic_cast<RackScene*>(gScene)->toolbar->wireOpacitySlider->value = json_number_value(wireOpacityJ);
-
-	// wireTension
-	json_t *wireTensionJ = json_object_get(rootJ, "wireTension");
-	if (wireTensionJ)
-		dynamic_cast<RackScene*>(gScene)->toolbar->wireTensionSlider->value = json_number_value(wireTensionJ);
+	// Detect old patches with ModuleWidget::params/inputs/outputs indices.
+	// (We now use Module::params/inputs/outputs indices.)
+	int legacy = 0;
+	if (startsWith(version, "0.3.") || startsWith(version, "0.4.") || startsWith(version, "0.5.") || version == "" || version == "dev") {
+		legacy = 1;
+	}
+	if (legacy) {
+		info("Loading patch using legacy mode %d", legacy);
+	}
 
 	// modules
 	std::map<int, ModuleWidget*> moduleWidgets;
@@ -179,29 +237,22 @@ void RackWidget::fromJson(json_t *rootJ) {
 	size_t moduleId;
 	json_t *moduleJ;
 	json_array_foreach(modulesJ, moduleId, moduleJ) {
-		// Get plugin
+		// Set legacy property
+		if (legacy)
+			json_object_set_new(moduleJ, "legacy", json_integer(legacy));
+
 		json_t *pluginSlugJ = json_object_get(moduleJ, "plugin");
 		if (!pluginSlugJ) continue;
-		const char *pluginSlug = json_string_value(pluginSlugJ);
-		Plugin *plugin = NULL;
-		for (Plugin *p : gPlugins) {
-			if (p->slug == pluginSlug) {
-				plugin = p;
-				break;
-			}
-		}
-		if (!plugin) continue;
+		json_t *modelSlugJ = json_object_get(moduleJ, "model");
+		if (!modelSlugJ) continue;
+		std::string pluginSlug = json_string_value(pluginSlugJ);
+		std::string modelSlug = json_string_value(modelSlugJ);
 
-		// Get model
-		json_t *modelSlug = json_object_get(moduleJ, "model");
-		Model *model = NULL;
-		for (Model *m : plugin->models) {
-			if (m->slug == json_string_value(modelSlug)) {
-				model = m;
-				break;
-			}
+		Model *model = pluginGetModel(pluginSlug, modelSlug);
+		if (!model) {
+			message += stringf("Could not find module \"%s\" in plugin \"%s\"\n", modelSlug.c_str(), pluginSlug.c_str());
+			continue;
 		}
-		if (!model) continue;
 
 		// Create ModuleWidget
 		ModuleWidget *moduleWidget = model->createModuleWidget();
@@ -217,136 +268,171 @@ void RackWidget::fromJson(json_t *rootJ) {
 	size_t wireId;
 	json_t *wireJ;
 	json_array_foreach(wiresJ, wireId, wireJ) {
-		int outputModuleId, outputId;
-		int inputModuleId, inputId;
-		int err = json_unpack(wireJ, "{s:i, s:i, s:i, s:i}",
-			"outputModuleId", &outputModuleId, "outputId", &outputId,
-			"inputModuleId", &inputModuleId, "inputId", &inputId);
-		if (err) continue;
-		// Get ports
+		int outputModuleId = json_integer_value(json_object_get(wireJ, "outputModuleId"));
+		int outputId = json_integer_value(json_object_get(wireJ, "outputId"));
+		int inputModuleId = json_integer_value(json_object_get(wireJ, "inputModuleId"));
+		int inputId = json_integer_value(json_object_get(wireJ, "inputId"));
+
+		// Get module widgets
 		ModuleWidget *outputModuleWidget = moduleWidgets[outputModuleId];
 		if (!outputModuleWidget) continue;
-		Port *outputPort = outputModuleWidget->outputs[outputId];
-		if (!outputPort) continue;
 		ModuleWidget *inputModuleWidget = moduleWidgets[inputModuleId];
 		if (!inputModuleWidget) continue;
-		Port *inputPort = inputModuleWidget->inputs[inputId];
-		if (!inputPort) continue;
+
+		// Get port widgets
+		Port *outputPort = NULL;
+		Port *inputPort = NULL;
+		if (legacy && legacy <= 1) {
+			outputPort = outputModuleWidget->outputs[outputId];
+			inputPort = inputModuleWidget->inputs[inputId];
+		}
+		else {
+			for (Port *port : outputModuleWidget->outputs) {
+				if (port->portId == outputId) {
+					outputPort = port;
+					break;
+				}
+			}
+			for (Port *port : inputModuleWidget->inputs) {
+				if (port->portId == inputId) {
+					inputPort = port;
+					break;
+				}
+			}
+		}
+		if (!outputPort || !inputPort)
+			continue;
+
 		// Create WireWidget
 		WireWidget *wireWidget = new WireWidget();
+		wireWidget->fromJson(wireJ);
 		wireWidget->outputPort = outputPort;
 		wireWidget->inputPort = inputPort;
-		outputPort->connectedWire = wireWidget;
-		inputPort->connectedWire = wireWidget;
 		wireWidget->updateWire();
 		// Add wire to rack
 		wireContainer->addChild(wireWidget);
 	}
+
+	// Display a message if we have something to say
+	if (!message.empty()) {
+		osdialog_message(OSDIALOG_INFO, OSDIALOG_OK, message.c_str());
+	}
 }
 
-void RackWidget::repositionModule(ModuleWidget *module) {
+void RackWidget::addModule(ModuleWidget *m) {
+	moduleContainer->addChild(m);
+	m->create();
+}
+
+void RackWidget::deleteModule(ModuleWidget *m) {
+	m->_delete();
+	moduleContainer->removeChild(m);
+}
+
+void RackWidget::cloneModule(ModuleWidget *m) {
+	// Create new module from model
+	ModuleWidget *clonedModuleWidget = m->model->createModuleWidget();
+	// JSON serialization is the most straightforward way to do this
+	json_t *moduleJ = m->toJson();
+	clonedModuleWidget->fromJson(moduleJ);
+	json_decref(moduleJ);
+	Rect clonedBox = clonedModuleWidget->box;
+	clonedBox.pos = m->box.pos;
+	requestModuleBoxNearest(clonedModuleWidget, clonedBox);
+	addModule(clonedModuleWidget);
+}
+
+bool RackWidget::requestModuleBox(ModuleWidget *m, Rect box) {
+	if (box.pos.x < 0 || box.pos.y < 0)
+		return false;
+
+	for (Widget *child2 : moduleContainer->children) {
+		if (m == child2) continue;
+		if (box.intersects(child2->box)) {
+			return false;
+		}
+	}
+	m->box = box;
+	return true;
+}
+
+bool RackWidget::requestModuleBoxNearest(ModuleWidget *m, Rect box) {
 	// Create possible positions
-	int x0 = roundf(module->requestedPos.x / RACK_GRID_WIDTH);
-	int y0 = roundf(module->requestedPos.y / RACK_GRID_HEIGHT);
+	int x0 = roundf(box.pos.x / RACK_GRID_WIDTH);
+	int y0 = roundf(box.pos.y / RACK_GRID_HEIGHT);
 	std::vector<Vec> positions;
-	for (int y = maxi(0, y0 - 2); y < y0 + 2; y++) {
-		for (int x = maxi(0, x0 - 40); x < x0 + 40; x++) {
+	for (int y = max(0, y0 - 8); y < y0 + 8; y++) {
+		for (int x = max(0, x0 - 400); x < x0 + 400; x++) {
 			positions.push_back(Vec(x * RACK_GRID_WIDTH, y * RACK_GRID_HEIGHT));
 		}
 	}
 
 	// Sort possible positions by distance to the requested position
-	Vec requestedPos = module->requestedPos;
-	std::sort(positions.begin(), positions.end(), [requestedPos](Vec a, Vec b) {
-		return a.minus(requestedPos).norm() < b.minus(requestedPos).norm();
+	std::sort(positions.begin(), positions.end(), [box](Vec a, Vec b) {
+		return a.minus(box.pos).norm() < b.minus(box.pos).norm();
 	});
 
 	// Find a position that does not collide
-	for (Vec pos : positions) {
-		Rect newBox = Rect(pos, module->box.size);
-		bool collides = false;
-		for (Widget *child2 : moduleContainer->children) {
-			if (module == child2) continue;
-			if (newBox.intersects(child2->box)) {
-				collides = true;
-				break;
-			}
-		}
-		if (collides) continue;
-
-		module->box.pos = pos;
-		break;
+	for (Vec position : positions) {
+		Rect newBox = box;
+		newBox.pos = position;
+		if (requestModuleBox(m, newBox))
+			return true;
 	}
+	return false;
 }
 
 void RackWidget::step() {
-	rails->step();
-
-	// Resize to be a bit larger than the ScrollWidget viewport
-	assert(parent);
-	assert(parent->parent);
+	// Expand size to fit modules
 	Vec moduleSize = moduleContainer->getChildrenBoundingBox().getBottomRight();
-	Vec viewportSize = parent->parent->box.size.minus(parent->box.pos);
-	box.size = moduleSize.max(viewportSize).plus(Vec(500, 500));
+	// We assume that the size is reset by a parent before calling step(). Otherwise it will grow unbounded.
+	box.size = box.size.max(moduleSize);
 
-	// Reposition modules
-	for (Widget *child : moduleContainer->children) {
-		ModuleWidget *module = dynamic_cast<ModuleWidget*>(child);
-		assert(module);
-		if (module->requested) {
-			repositionModule(module);
-			module->requested = false;
-		}
+	// Adjust size and position of rails
+	Widget *rail = rails->children.front();
+	Rect bound = getViewport(Rect(Vec(), box.size));
+	if (!rails->box.contains(bound)) {
+		Vec cellMargin = Vec(20, 1);
+		rails->box.pos = bound.pos.div(RACK_GRID_SIZE).floor().minus(cellMargin).mult(RACK_GRID_SIZE);
+		rails->box.size = bound.size.plus(cellMargin.mult(RACK_GRID_SIZE).mult(2));
+		rails->dirty = true;
+
+		rail->box.size = rails->box.size;
 	}
 
 	// Autosave every 15 seconds
-	if (gGuiFrame % (60*15) == 0) {
-		savePatch("autosave.json");
+	if (gGuiFrame % (60 * 15) == 0) {
+		savePatch(assetLocal("autosave.vcv"));
+		settingsSave(assetLocal("settings.json"));
 	}
 
 	Widget::step();
 }
 
 void RackWidget::draw(NVGcontext *vg) {
-	// Draw rails
-	nvgBeginPath(vg);
-	nvgRect(vg, 0.0, 0.0, box.size.x, box.size.y);
-	NVGpaint paint = nvgImagePattern(vg, rails->box.pos.x, rails->box.pos.y, rails->box.size.x, rails->box.size.y, 0.0, rails->getImageHandle(), 1.0);
-	nvgFillPaint(vg, paint);
-	nvgFill(vg);
-
 	Widget::draw(vg);
 }
 
-struct AddModuleMenuItem : MenuItem {
-	Model *model;
-	Vec modulePos;
-	void onAction() {
-		ModuleWidget *moduleWidget = model->createModuleWidget();
-		moduleWidget->requestedPos = modulePos.minus(moduleWidget->box.getCenter());
-		moduleWidget->requested = true;
-		gRackWidget->moduleContainer->addChild(moduleWidget);
-	}
-};
+void RackWidget::onMouseMove(EventMouseMove &e) {
+	OpaqueWidget::onMouseMove(e);
+	lastMousePos = e.pos;
+}
 
-void RackWidget::onMouseDown(int button) {
-	if (button == 1) {
-		Vec modulePos = gMousePos.minus(getAbsolutePos());
-		Menu *menu = gScene->createMenu();
+void RackWidget::onMouseDown(EventMouseDown &e) {
+	Widget::onMouseDown(e);
+	if (e.consumed)
+		return;
 
-		MenuLabel *menuLabel = new MenuLabel();
-		menuLabel->text = "Add Module";
-		menu->pushChild(menuLabel);
-		for (Plugin *plugin : gPlugins) {
-			for (Model *model : plugin->models) {
-				AddModuleMenuItem *item = new AddModuleMenuItem();
-				item->text = model->plugin->name + ": " + model->name;
-				item->model = model;
-				item->modulePos = modulePos;
-				menu->pushChild(item);
-			}
-		}
+	if (e.button == 1) {
+		appModuleBrowserCreate();
 	}
+	e.consumed = true;
+	e.target = this;
+}
+
+void RackWidget::onZoom(EventZoom &e) {
+	rails->box.size = Vec();
+	Widget::onZoom(e);
 }
 
 

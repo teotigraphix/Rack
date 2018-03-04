@@ -1,4 +1,5 @@
 #include "widgets.hpp"
+#include "app.hpp"
 #include <algorithm>
 
 
@@ -11,32 +12,44 @@ Widget::~Widget() {
 	if (gHoveredWidget == this) gHoveredWidget = NULL;
 	if (gDraggedWidget == this) gDraggedWidget = NULL;
 	if (gDragHoveredWidget == this) gDragHoveredWidget = NULL;
-	if (gSelectedWidget == this) gSelectedWidget = NULL;
+	if (gFocusedWidget == this) gFocusedWidget = NULL;
 	clearChildren();
 }
 
-Vec Widget::getAbsolutePos() {
-	// Recursively compute position offset from parents
-	if (!parent) {
-		return box.pos;
+Rect Widget::getChildrenBoundingBox() {
+	Rect bound;
+	for (Widget *child : children) {
+		if (child == children.front()) {
+			bound = child->box;
+		}
+		else {
+			bound = bound.expand(child->box);
+		}
 	}
-	else {
-		return box.pos.plus(parent->getAbsolutePos());
-	}
+	return bound;
 }
 
-Rect Widget::getChildrenBoundingBox() {
-	if (children.empty()) {
-		return Rect();
+Vec Widget::getRelativeOffset(Vec v, Widget *relative) {
+	if (this == relative) {
+		return v;
 	}
+	v = v.plus(box.pos);
+	if (parent) {
+		v = parent->getRelativeOffset(v, relative);
+	}
+	return v;
+}
 
-	Vec topLeft = Vec(INFINITY, INFINITY);
-	Vec bottomRight = Vec(-INFINITY, -INFINITY);
-	for (Widget *child : children) {
-		topLeft = topLeft.min(child->box.pos);
-		bottomRight = bottomRight.max(child->box.getBottomRight());
+Rect Widget::getViewport(Rect r) {
+	Rect bound;
+	if (parent) {
+		bound = parent->getViewport(box);
 	}
-	return Rect(topLeft, bottomRight.minus(topLeft));
+	else {
+		bound = box;
+	}
+	bound.pos = bound.pos.minus(box.pos);
+	return r.clamp(bound);
 }
 
 void Widget::addChild(Widget *widget) {
@@ -62,6 +75,31 @@ void Widget::clearChildren() {
 	children.clear();
 }
 
+void Widget::finalizeEvents() {
+	// Stop dragging and hovering this widget
+	if (gHoveredWidget == this) {
+		EventMouseLeave e;
+		gHoveredWidget->onMouseLeave(e);
+		gHoveredWidget = NULL;
+	}
+	if (gDraggedWidget == this) {
+		EventDragEnd e;
+		gDraggedWidget->onDragEnd(e);
+		gDraggedWidget = NULL;
+	}
+	if (gDragHoveredWidget == this) {
+		gDragHoveredWidget = NULL;
+	}
+	if (gFocusedWidget == this) {
+		EventDefocus e;
+		gFocusedWidget->onDefocus(e);
+		gFocusedWidget = NULL;
+	}
+	for (Widget *child : children) {
+		child->finalizeEvents();
+	}
+}
+
 void Widget::step() {
 	for (Widget *child : children) {
 		child->step();
@@ -79,60 +117,52 @@ void Widget::draw(NVGcontext *vg) {
 	}
 }
 
-Widget *Widget::onMouseDown(Vec pos, int button) {
-	for (auto it = children.rbegin(); it != children.rend(); it++) {
-		Widget *child = *it;
-		if (!child->visible)
-			continue;
-		if (child->box.contains(pos)) {
-			Widget *w = child->onMouseDown(pos.minus(child->box.pos), button);
-			if (w)
-				return w;
-		}
-	}
-	return NULL;
+#define RECURSE_EVENT_POSITION(_method) { \
+	Vec pos = e.pos; \
+	for (auto it = children.rbegin(); it != children.rend(); it++) { \
+		Widget *child = *it; \
+		if (!child->visible) \
+			continue; \
+		if (child->box.contains(pos)) { \
+			e.pos = pos.minus(child->box.pos); \
+			child->_method(e); \
+			if (e.consumed) \
+				break; \
+		} \
+	} \
+	e.pos = pos; \
 }
 
-Widget *Widget::onMouseUp(Vec pos, int button) {
-	for (auto it = children.rbegin(); it != children.rend(); it++) {
-		Widget *child = *it;
-		if (!child->visible)
-			continue;
-		if (child->box.contains(pos)) {
-			Widget *w = child->onMouseUp(pos.minus(child->box.pos), button);
-			if (w)
-				return w;
-		}
-	}
-	return NULL;
+
+void Widget::onMouseDown(EventMouseDown &e) {
+	RECURSE_EVENT_POSITION(onMouseDown);
 }
 
-Widget *Widget::onMouseMove(Vec pos, Vec mouseRel) {
-	for (auto it = children.rbegin(); it != children.rend(); it++) {
-		Widget *child = *it;
-		if (!child->visible)
-			continue;
-		if (child->box.contains(pos)) {
-			Widget *w = child->onMouseMove(pos.minus(child->box.pos), mouseRel);
-			if (w)
-				return w;
-		}
-	}
-	return NULL;
+void Widget::onMouseUp(EventMouseUp &e) {
+	RECURSE_EVENT_POSITION(onMouseUp);
 }
 
-Widget *Widget::onScroll(Vec pos, Vec scrollRel) {
+void Widget::onMouseMove(EventMouseMove &e) {
+	RECURSE_EVENT_POSITION(onMouseMove);
+}
+
+void Widget::onHoverKey(EventHoverKey &e) {
+	RECURSE_EVENT_POSITION(onHoverKey);
+}
+
+void Widget::onScroll(EventScroll &e) {
+	RECURSE_EVENT_POSITION(onScroll);
+}
+
+void Widget::onPathDrop(EventPathDrop &e) {
+	RECURSE_EVENT_POSITION(onPathDrop);
+}
+
+void Widget::onZoom(EventZoom &e) {
 	for (auto it = children.rbegin(); it != children.rend(); it++) {
 		Widget *child = *it;
-		if (!child->visible)
-			continue;
-		if (child->box.contains(pos)) {
-			Widget *w = child->onScroll(pos.minus(child->box.pos), scrollRel);
-			if (w)
-				return w;
-		}
+		child->onZoom(e);
 	}
-	return NULL;
 }
 
 } // namespace rack

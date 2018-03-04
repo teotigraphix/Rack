@@ -1,4 +1,12 @@
-Rack
-Rack.exe
-autosave.json
-build
+/Rack
+/Rack.exe
+/libRack.a
+/autosave.json
+/settings.json
+/plugins
+/build
+/dep
+*.vcv
+/patches
+/design
+.DS_Store

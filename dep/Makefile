@@ -1,113 +1,179 @@
-
-LOCAL = $(PWD)
+LOCAL = $(shell pwd)
 
 # Arch-specifics
 include ../arch.mk
 
+FLAGS += -g -O3 -march=nocona
+
 ifeq ($(ARCH),mac)
-	export CFLAGS = -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.7.sdk \
-		-mmacosx-version-min=10.7
-	export CXXFLAGS = $(CFLAGS)
-	export LDFLAGS = $(CFLAGS)
+	FLAGS += -mmacosx-version-min=10.7 -stdlib=libc++
+	LDFLAGS += -mmacosx-version-min=10.7 -stdlib=libc++
 endif
 
+CFLAGS += $(FLAGS)
+CXXFLAGS += $(FLAGS)
+export CFLAGS
+export CXXFLAGS
+export LDFLAGS
+
+
 # Commands
-WGET = wget -nc
+WGET = curl -OL
 UNTAR = tar xf
 UNZIP = unzip
 ifeq ($(ARCH),win)
-CMAKE = cmake -G 'MSYS Makefiles'
+	CMAKE = cmake -G 'MSYS Makefiles'
 else
-CMAKE = cmake
+	CMAKE = cmake
 endif
 
-# Packages
-glew = glew-2.1.0
-glfw = glfw-3.2.1
-jansson = jansson-2.10
-libsamplerate = libsamplerate-0.1.9
-libcurl = curl-7.54.1
-libzip = libzip-1.2.0
-portmidi = portmidi
-portaudio = portaudio
-asio = asiosdk2.3
+# Libraries
+ifeq ($(ARCH),lin)
+	glew = lib/libGLEW.so
+	glfw = lib/libglfw.so
+	jansson = lib/libjansson.so
+	libspeexdsp = lib/libspeexdsp.so
+	libcurl = lib/libcurl.so
+	libzip = lib/libzip.so
+	rtmidi = lib/librtmidi.so
+	rtaudio = lib/librtaudio.so
+	openssl = lib/libssl.so
+endif
+
+ifeq ($(ARCH),mac)
+	glew = lib/libGLEW.dylib
+	glfw = lib/libglfw.dylib
+	jansson = lib/libjansson.dylib
+	libspeexdsp = lib/libspeexdsp.dylib
+	libcurl = lib/libcurl.dylib
+	libzip = lib/libzip.dylib
+	rtmidi = lib/librtmidi.dylib
+	rtaudio = lib/librtaudio.dylib
+	openssl = lib/libssl.dylib
+endif
+
+ifeq ($(ARCH),win)
+	glew = bin/glew32.dll
+	glfw = bin/glfw3.dll
+	jansson = bin/libjansson-4.dll
+	libspeexdsp = bin/libspeexdsp-1.dll
+	libcurl = bin/libcurl-4.dll
+	libzip = bin/libzip-5.dll
+	rtmidi = bin/librtmidi-4.dll
+	rtaudio = bin/librtaudio.dll
+	openssl = bin/libssl-1_1-x64.dll
+endif
+
+nanovg = include/nanovg.h
+nanosvg = include/nanosvg.h
+oui-blendish = include/blendish.h
+osdialog = include/osdialog.h
 
 
 .NOTPARALLEL:
 
-all: $(glew) $(glfw) $(jansson) $(libsamplerate) $(libcurl) $(libzip) $(portmidi) $(portaudio)
+all: $(glew) $(glfw) $(jansson) $(libspeexdsp) $(libcurl) $(libzip) $(rtmidi) $(rtaudio) $(nanovg) $(nanosvg) $(oui-blendish) $(osdialog)
+	@echo ""
+	@echo "#######################################"
+	@echo "# Built all dependencies successfully #"
+	@echo "#######################################"
+	@echo ""
 
 $(glew):
-	$(WGET) https://downloads.sourceforge.net/project/glew/glew/$(patsubst glew-%,%,$@)/$@.tgz
-	$(UNTAR) $@.tgz
-	$(MAKE) -C $@ glew.lib
+	$(WGET) https://github.com/nigels-com/glew/releases/download/glew-2.1.0/glew-2.1.0.tgz
+	$(UNTAR) glew-2.1.0.tgz
+	$(MAKE) -C glew-2.1.0 glew.lib
 	# On Linux, default lib path is lib64, so change it back to lib.
-	$(MAKE) -C $@ GLEW_DEST="$(LOCAL)" LIBDIR="$(LOCAL)/lib" install
+	$(MAKE) -C glew-2.1.0 GLEW_DEST="$(LOCAL)" LIBDIR="$(LOCAL)/lib" install
 
 $(glfw):
-	$(WGET) https://github.com/glfw/glfw/releases/download/$(patsubst glfw-%,%,$@)/$@.zip
-	$(UNZIP) $@.zip
-	cd $@ && $(CMAKE) . \
+	cd glfw && $(CMAKE) . \
 		-DCMAKE_INSTALL_PREFIX="$(LOCAL)" -DBUILD_SHARED_LIBS=ON \
-		-DGLFW_USE_CHDIR=OFF -DGLFW_USE_MENUBAR=ON -DGLFW_USE_RETINA=ON
-	$(MAKE) -C $@
-	$(MAKE) -C $@ install
-ifeq ($(ARCH),win)
-	# Not sure why the GLFW build system puts a .dll in the lib directory
-	mv "$(LOCAL)/lib/glfw3.dll" "$(LOCAL)/bin/"
-endif
+		-DGLFW_COCOA_CHDIR_RESOURCES=OFF -DGLFW_COCOA_MENUBAR=ON -DGLFW_COCOA_RETINA_FRAMEBUFFER=ON
+	$(MAKE) -C glfw
+	$(MAKE) -C glfw install
 
 $(jansson):
-	$(WGET) http://www.digip.org/jansson/releases/$@.tar.gz
-	$(UNTAR) $@.tar.gz
-	cd $@ && ./configure --prefix="$(LOCAL)"
-	$(MAKE) -C $@
-	$(MAKE) -C $@ install
+	$(WGET) http://www.digip.org/jansson/releases/jansson-2.10.tar.gz
+	$(UNTAR) jansson-2.10.tar.gz
+	cd jansson-2.10 && ./configure --prefix="$(LOCAL)"
+	$(MAKE) -C jansson-2.10
+	$(MAKE) -C jansson-2.10 install
 
-$(libsamplerate):
-	$(WGET) http://www.mega-nerd.com/SRC/$@.tar.gz
-	$(UNTAR) $@.tar.gz
-	cd $@ && ./configure --prefix="$(LOCAL)"
-	$(MAKE) -C $@
-	$(MAKE) -C $@ install
+$(libspeexdsp):
+	$(WGET) https://vcvrack.com/downloads/dep/speexdsp-SpeexDSP-1.2rc3.tgz
+	$(UNTAR) speexdsp-SpeexDSP-1.2rc3.tgz
+	cd speexdsp-SpeexDSP-1.2rc3 && ./configure --prefix="$(LOCAL)"
+	$(MAKE) -C speexdsp-SpeexDSP-1.2rc3
+	$(MAKE) -C speexdsp-SpeexDSP-1.2rc3 install
 
-$(libcurl):
-	$(WGET) https://curl.haxx.se/download/$@.tar.gz
-	$(UNTAR) $@.tar.gz
-	cd $@ && ./configure --prefix="$(LOCAL)" \
+$(openssl):
+	$(WGET) https://www.openssl.org/source/openssl-1.1.0g.tar.gz
+	$(UNTAR) openssl-1.1.0g.tar.gz
+	cd openssl-1.1.0g && ./config --prefix="$(LOCAL)"
+	$(MAKE) -C openssl-1.1.0g
+	$(MAKE) -C openssl-1.1.0g install_sw
+
+$(libcurl): $(openssl)
+	$(WGET) https://github.com/curl/curl/releases/download/curl-7_56_0/curl-7.56.0.tar.gz
+	$(UNTAR) curl-7.56.0.tar.gz
+	cd curl-7.56.0 && ./configure --prefix="$(LOCAL)" \
 		--disable-ftp --disable-file --disable-ldap --disable-ldaps --disable-rtsp --disable-proxy --disable-dict --disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smb --disable-smtp --disable-gopher --disable-manual \
-		--without-zlib --without-ssl --without-ca-bundle --without-ca-path --without-ca-fallback --without-libpsl --without-libmetalink --without-libssh2 --without-librtmp --without-winidn --without-libidn2 --without-nghttp2
-	$(MAKE) -C $@
-	$(MAKE) -C $@ install
+		--without-zlib --without-libpsl --without-libmetalink --without-libssh2 --without-librtmp --without-winidn --without-libidn2 --without-nghttp2 \
+		--without-ca-bundle --with-ca-fallback --with-ssl="$(LOCAL)"
+	$(MAKE) -C curl-7.56.0
+	$(MAKE) -C curl-7.56.0 install
 
 $(libzip):
-	$(WGET) https://nih.at/libzip/$@.tar.gz
-	$(UNTAR) $@.tar.gz
-	cd $@ && ./configure --prefix="$(LOCAL)"
-	$(MAKE) -C $@
-	$(MAKE) -C $@ install
+	$(WGET) https://nih.at/libzip/libzip-1.2.0.tar.gz
+	$(UNTAR) libzip-1.2.0.tar.gz
+	cd libzip-1.2.0 && ./configure --prefix="$(LOCAL)"
+	$(MAKE) -C libzip-1.2.0
+	$(MAKE) -C libzip-1.2.0 install
 
-$(portmidi):
-	git clone https://github.com/AndrewBelt/portmidi.git $@
-	cd $@ && $(CMAKE) . -DCMAKE_INSTALL_PREFIX="$(LOCAL)"
-	$(MAKE) -C $@
-	$(MAKE) -C $@ install
+$(rtmidi):
+	$(WGET) https://vcvrack.com/downloads/dep/rtmidi.tgz
+	$(UNTAR) rtmidi.tgz
+	cd rtmidi && ./configure --prefix="$(LOCAL)"
+	$(MAKE) -C rtmidi
+	$(MAKE) -C rtmidi install
 
-$(portaudio):
+ifeq ($(ARCH),mac)
+RTAUDIO_FLAGS += -DAUDIO_OSX_CORE=ON
+endif
 ifeq ($(ARCH),win)
-	$(WGET) https://github.com/adfernandes/precompiled-portaudio-windows/raw/master/portaudio-r1891-build.zip
-	$(UNZIP) portaudio-r1891-build.zip
-	mv portaudio-r1891-build $@
-	cp portaudio/lib/x64/ReleaseMinDependency/portaudio_x64.lib "$(LOCAL)/lib"
-	cp portaudio/lib/x64/ReleaseMinDependency/portaudio_x64.dll "$(LOCAL)/bin"
-	cp portaudio/include/*.h "$(LOCAL)/include"
-else
-	$(WGET) http://www.portaudio.com/archives/pa_stable_v190600_20161030.tgz
-	$(UNTAR) pa_stable_v190600_20161030.tgz
-	cd $@ && ./configure --prefix="$(LOCAL)" $(PORTAUDIO_ASIO)
-	$(MAKE) -C $@
-	$(MAKE) -C $@ install
+RTAUDIO_FLAGS += -DAUDIO_WINDOWS_DS=ON -DAUDIO_WINDOWS_WASAPI=ON -DAUDIO_WINDOWS_ASIO=ON
+endif
+ifeq ($(ARCH),lin)
+RTAUDIO_FLAGS += -DAUDIO_LINUX_ALSA=ON
 endif
 
+ifdef RTAUDIO_ALL_APIS
+ifeq ($(ARCH),mac)
+RTAUDIO_FLAGS += -DAUDIO_UNIX_JACK=ON
+endif
+ifeq ($(ARCH),lin)
+RTAUDIO_FLAGS += -DAUDIO_LINUX_PULSE=ON -DAUDIO_UNIX_JACK=ON
+endif
+endif
+
+$(rtaudio):
+	cd rtaudio && mkdir -p build
+	cd rtaudio/build && cmake -G 'Unix Makefiles' -DCMAKE_INSTALL_PREFIX="$(LOCAL)" $(RTAUDIO_FLAGS) ..
+	$(MAKE) -C rtaudio/build
+	$(MAKE) -C rtaudio/build install
+
+$(nanovg):
+	cp nanovg/src/*.h include/
+
+$(nanosvg):
+	cp nanosvg/src/*.h include/
+
+$(oui-blendish):
+	cp oui-blendish/*.h include/
+
+$(osdialog):
+	cp osdialog/*.h include/
+
 clean:
-	git clean -fdxi
+	git clean -ffdx

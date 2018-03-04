@@ -2,18 +2,21 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <math.h>
-#include <set>
+#include <vector>
+#include <algorithm>
 #include <chrono>
 #include <thread>
 #include <xmmintrin.h>
+#include <pmmintrin.h>
 
 #include "engine.hpp"
-#include "util.hpp"
 
 
 namespace rack {
 
-float gSampleRate;
+float sampleRate;
+float sampleTime;
+bool gPaused = false;
 
 
 static bool running = false;
@@ -22,9 +25,8 @@ static std::mutex mutex;
 static std::thread thread;
 static VIPMutex vipMutex;
 
-static std::set<Module*> modules;
-// Merely used for keeping track of which module inputs point to which module outputs, to prevent pointer mistakes and make the rack API more rigorous
-static std::set<Wire*> wires;
+static std::vector<Module*> modules;
+static std::vector<Wire*> wires;
 
 // Parameter interpolation
 static Module *smoothModule = NULL;
@@ -32,12 +34,35 @@ static int smoothParamId;
 static float smoothValue;
 
 
+float Light::getBrightness() {
+	return sqrtf(fmaxf(0.f, value));
+}
+
+void Light::setBrightnessSmooth(float brightness, float frames) {
+	float v = (brightness > 0.f) ? brightness * brightness : 0.f;
+	if (v < value) {
+		// Fade out light with lambda = framerate
+		value += (v - value) * sampleTime * frames * 60.f;
+	}
+	else {
+		// Immediately illuminate light
+		value = v;
+	}
+}
+
+
+void Wire::step() {
+	float value = outputModule->outputs[outputId].value;
+	inputModule->inputs[inputId].value = value;
+}
+
+
 void engineInit() {
-	gSampleRate = 44100.0;
+	engineSetSampleRate(44100.0);
 }
 
 void engineDestroy() {
-	// Make sure there are no wires or modules in the rack on destruction. This suggests that a module failed to remove itself before the GUI was destroyed.
+	// Make sure there are no wires or modules in the rack on destruction. This suggests that a module failed to remove itself before the WINDOW was destroyed.
 	assert(wires.empty());
 	assert(modules.empty());
 }
@@ -45,63 +70,84 @@ void engineDestroy() {
 static void engineStep() {
 	// Param interpolation
 	if (smoothModule) {
-		float value = smoothModule->params[smoothParamId];
+		float value = smoothModule->params[smoothParamId].value;
 		const float lambda = 60.0; // decay rate is 1 graphics frame
-		const float snap = 0.0001;
 		float delta = smoothValue - value;
-		if (fabsf(delta) < snap) {
-			smoothModule->params[smoothParamId] = smoothValue;
+		float newValue = value + delta * lambda * sampleTime;
+		if (value == newValue) {
+			// Snap to actual smooth value if the value doesn't change enough (due to the granularity of floats)
+			smoothModule->params[smoothParamId].value = smoothValue;
 			smoothModule = NULL;
 		}
 		else {
-			value += delta * lambda / gSampleRate;
-			smoothModule->params[smoothParamId] = value;
+			smoothModule->params[smoothParamId].value = newValue;
 		}
 	}
-	// Step all modules
-	std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+
+	// Step modules
 	for (Module *module : modules) {
-		// Start clock for CPU usage
-		start = std::chrono::high_resolution_clock::now();
-		// Step module by one frame
 		module->step();
-		// Stop clock and smooth step time value
-		end = std::chrono::high_resolution_clock::now();
-		std::chrono::duration<float> diff = end - start;
-		float elapsed = diff.count() * gSampleRate;
-		const float lambda = 1.0;
-		module->cpuTime += (elapsed - module->cpuTime) * lambda / gSampleRate;
+
+		// TODO skip this step when plug lights are disabled
+		// Step ports
+		for (Input &input : module->inputs) {
+			if (input.active) {
+				float value = input.value / 10.f;
+				input.plugLights[0].setBrightnessSmooth(value);
+				input.plugLights[1].setBrightnessSmooth(-value);
+			}
+		}
+		for (Output &output : module->outputs) {
+			if (output.active) {
+				float value = output.value / 10.f;
+				output.plugLights[0].setBrightnessSmooth(value);
+				output.plugLights[1].setBrightnessSmooth(-value);
+			}
+		}
 	}
+
 	// Step cables by moving their output values to inputs
 	for (Wire *wire : wires) {
-		wire->inputValue = wire->outputValue;
-		wire->outputValue = 0.0;
+		wire->step();
 	}
 }
 
 static void engineRun() {
-	// Set CPU to denormals-are-zero mode
-	// http://carlh.net/plugins/denormals.php
+	// Set CPU to flush-to-zero (FTZ) and denormals-are-zero (DAZ) mode
+	// https://software.intel.com/en-us/node/682949
 	_MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+	_MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
 	// Every time the engine waits and locks a mutex, it steps this many frames
-	const int stepSize = 32;
+	const int mutexSteps = 64;
+	// Time in seconds that the engine is rushing ahead of the estimated clock time
+	double ahead = 0.0;
+	auto lastTime = std::chrono::high_resolution_clock::now();
 
 	while (running) {
 		vipMutex.wait();
 
-		auto start = std::chrono::high_resolution_clock::now();
-		{
+		if (!gPaused) {
 			std::lock_guard<std::mutex> lock(mutex);
-			for (int i = 0; i < stepSize; i++) {
+			for (int i = 0; i < mutexSteps; i++) {
 				engineStep();
 			}
 		}
-		auto end = std::chrono::high_resolution_clock::now();
-		auto duration = std::chrono::nanoseconds((long) (0.10 * 1e9 * stepSize / gSampleRate)) - (end - start);
+
+		double stepTime = mutexSteps * sampleTime;
+		ahead += stepTime;
+		auto currTime = std::chrono::high_resolution_clock::now();
+		const double aheadFactor = 2.0;
+		ahead -= aheadFactor * std::chrono::duration<double>(currTime - lastTime).count();
+		lastTime = currTime;
+		ahead = fmaxf(ahead, 0.0);
+
 		// Avoid pegging the CPU at 100% when there are no "blocking" modules like AudioInterface, but still step audio at a reasonable rate
-		// if (duration > 0)
-		// 	std::this_thread::sleep_for(duration);
+		// The number of steps to wait before possibly sleeping
+		const double aheadMax = 1.0; // seconds
+		if (ahead > aheadMax) {
+			std::this_thread::sleep_for(std::chrono::duration<double>(stepTime));
+		}
 	}
 }
 
@@ -120,15 +166,16 @@ void engineAddModule(Module *module) {
 	VIPLock vipLock(vipMutex);
 	std::lock_guard<std::mutex> lock(mutex);
 	// Check that the module is not already added
-	assert(modules.find(module) == modules.end());
-	modules.insert(module);
+	auto it = std::find(modules.begin(), modules.end(), module);
+	assert(it == modules.end());
+	modules.push_back(module);
 }
 
 void engineRemoveModule(Module *module) {
 	assert(module);
 	VIPLock vipLock(vipMutex);
 	std::lock_guard<std::mutex> lock(mutex);
-	// Remove parameter interpolation which point to this module
+	// If a param is being smoothed on this module, stop smoothing it immediately
 	if (module == smoothModule) {
 		smoothModule = NULL;
 	}
@@ -137,9 +184,27 @@ void engineRemoveModule(Module *module) {
 		assert(wire->outputModule != module);
 		assert(wire->inputModule != module);
 	}
-	auto it = modules.find(module);
-	if (it != modules.end()) {
-		modules.erase(it);
+	// Check that the module actually exists
+	auto it = std::find(modules.begin(), modules.end(), module);
+	assert(it != modules.end());
+	// Remove it
+	modules.erase(it);
+}
+
+static void updateActive() {
+	// Set everything to inactive
+	for (Module *module : modules) {
+		for (Input &input : module->inputs) {
+			input.active = false;
+		}
+		for (Output &output : module->outputs) {
+			output.active = false;
+		}
+	}
+	// Set inputs/outputs to active
+	for (Wire *wire : wires) {
+		wire->outputModule->outputs[wire->outputId].active = true;
+		wire->inputModule->inputs[wire->inputId].active = true;
 	}
 }
 
@@ -147,49 +212,66 @@ void engineAddWire(Wire *wire) {
 	assert(wire);
 	VIPLock vipLock(vipMutex);
 	std::lock_guard<std::mutex> lock(mutex);
-	// Check that the wire is not already added
-	assert(wires.find(wire) == wires.end());
+	// Check wire properties
 	assert(wire->outputModule);
 	assert(wire->inputModule);
-	// Check that the inputs/outputs are not already used by another cable
+	// Check that the wire is not already added, and that the input is not already used by another cable
 	for (Wire *wire2 : wires) {
 		assert(wire2 != wire);
-		assert(!(wire2->outputModule == wire->outputModule && wire2->outputId == wire->outputId));
 		assert(!(wire2->inputModule == wire->inputModule && wire2->inputId == wire->inputId));
 	}
-	// Connect the wire to inputModule
-	wires.insert(wire);
-	wire->inputModule->inputs[wire->inputId] = &wire->inputValue;
-	wire->outputModule->outputs[wire->outputId] = &wire->outputValue;
+	// Add the wire
+	wires.push_back(wire);
+	updateActive();
 }
 
 void engineRemoveWire(Wire *wire) {
 	assert(wire);
 	VIPLock vipLock(vipMutex);
 	std::lock_guard<std::mutex> lock(mutex);
-	// Disconnect wire from inputModule
-	wire->inputModule->inputs[wire->inputId] = NULL;
-	wire->outputModule->outputs[wire->outputId] = NULL;
-
-	auto it = wires.find(wire);
+	// Check that the wire is already added
+	auto it = std::find(wires.begin(), wires.end(), wire);
 	assert(it != wires.end());
+	// Set input to 0V
+	wire->inputModule->inputs[wire->inputId].value = 0.0;
+	// Remove the wire
 	wires.erase(it);
+	updateActive();
+}
+
+void engineSetParam(Module *module, int paramId, float value) {
+	module->params[paramId].value = value;
 }
 
 void engineSetParamSmooth(Module *module, int paramId, float value) {
 	VIPLock vipLock(vipMutex);
 	std::lock_guard<std::mutex> lock(mutex);
-	// Check existing parameter interpolation
-	if (smoothModule) {
-		if (!(smoothModule == module && smoothParamId == paramId)) {
-			// Jump param value to smooth value
-			smoothModule->params[smoothParamId] = smoothValue;
-		}
+	// Since only one param can be smoothed at a time, if another param is currently being smoothed, skip to its final state
+	if (smoothModule && !(smoothModule == module && smoothParamId == paramId)) {
+		smoothModule->params[smoothParamId].value = smoothValue;
 	}
 	smoothModule = module;
 	smoothParamId = paramId;
 	smoothValue = value;
 }
 
+void engineSetSampleRate(float newSampleRate) {
+	VIPLock vipLock(vipMutex);
+	std::lock_guard<std::mutex> lock(mutex);
+	sampleRate = newSampleRate;
+	sampleTime = 1.0 / sampleRate;
+	// onSampleRateChange
+	for (Module *module : modules) {
+		module->onSampleRateChange();
+	}
+}
+
+float engineGetSampleRate() {
+	return sampleRate;
+}
+
+float engineGetSampleTime() {
+	return sampleTime;
+}
 
 } // namespace rack

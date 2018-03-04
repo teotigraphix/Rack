@@ -1,9 +1,55 @@
 #include <thread>
 #include "app.hpp"
 #include "plugin.hpp"
+#include "window.hpp"
+#include "osdialog.h"
 
 
 namespace rack {
+
+
+struct SyncButton : Button {
+	bool checked = false;
+	bool available = false;
+	bool completed = false;
+
+	void step() override {
+		if (!checked) {
+			std::thread t([this]() {
+				if (pluginSync(true))
+					available = true;
+			});
+			t.detach();
+			checked = true;
+		}
+		if (completed) {
+			if (osdialog_message(OSDIALOG_INFO, OSDIALOG_OK_CANCEL, "All plugins have been updated. Close Rack and re-launch it to load new updates.")) {
+				windowClose();
+			}
+			completed = false;
+		}
+	}
+	void draw(NVGcontext *vg) override {
+		Button::draw(vg);
+		if (available) {
+			// Notification circle
+			nvgBeginPath(vg);
+			nvgCircle(vg, 3, 3, 4.0);
+			nvgFillColor(vg, nvgRGBf(1.0, 0.0, 0.0));
+			nvgFill(vg);
+			nvgStrokeColor(vg, nvgRGBf(0.5, 0.0, 0.0));
+			nvgStroke(vg);
+		}
+	}
+	void onAction(EventAction &e) override {
+		available = false;
+		std::thread t([this]() {
+			if (pluginSync(false))
+				completed = true;
+		});
+		t.detach();
+	}
+};
 
 
 PluginManagerWidget::PluginManagerWidget() {
@@ -15,8 +61,8 @@ PluginManagerWidget::PluginManagerWidget() {
 		Vec pos = Vec(0, 0);
 
 		struct RegisterButton : Button {
-			void onAction() {
-				std::thread t(openBrowser, "http://vcvrack.com/");
+			void onAction(EventAction &e) override {
+				std::thread t(openBrowser, "https://vcvrack.com/");
 				t.detach();
 			}
 		};
@@ -46,7 +92,7 @@ PluginManagerWidget::PluginManagerWidget() {
 		struct LogInButton : Button {
 			TextField *emailField;
 			TextField *passwordField;
-			void onAction() {
+			void onAction(EventAction &e) override {
 				std::thread t(pluginLogIn, emailField->text, passwordField->text);
 				t.detach();
 				passwordField->text = "";
@@ -63,7 +109,7 @@ PluginManagerWidget::PluginManagerWidget() {
 		pos.x += logInButton->box.size.x;
 
 		struct StatusLabel : Label {
-			void step() {
+			void step() override {
 				text = pluginGetLoginStatus();
 			}
 		};
@@ -79,8 +125,8 @@ PluginManagerWidget::PluginManagerWidget() {
 		Vec pos = Vec(0, 0);
 
 		struct ManageButton : Button {
-			void onAction() {
-				std::thread t(openBrowser, "http://vcvrack.com/");
+			void onAction(EventAction &e) override {
+				std::thread t(openBrowser, "https://vcvrack.com/");
 				t.detach();
 			}
 		};
@@ -91,22 +137,16 @@ PluginManagerWidget::PluginManagerWidget() {
 		manageWidget->addChild(manageButton);
 		pos.x += manageButton->box.size.x;
 
-		struct RefreshButton : Button {
-			void onAction() {
-				std::thread t(pluginRefresh);
-				t.detach();
-			}
-		};
 		pos.x += margin;
-		Button *refreshButton = new RefreshButton();
-		refreshButton->box.pos = pos;
-		refreshButton->box.size.x = 125;
-		refreshButton->text = "Refresh plugins";
-		manageWidget->addChild(refreshButton);
-		pos.x += refreshButton->box.size.x;
+		Button *syncButton = new SyncButton();
+		syncButton->box.pos = pos;
+		syncButton->box.size.x = 125;
+		syncButton->text = "Update plugins";
+		manageWidget->addChild(syncButton);
+		pos.x += syncButton->box.size.x;
 
 		struct LogOutButton : Button {
-			void onAction() {
+			void onAction(EventAction &e) override {
 				pluginLogOut();
 			}
 		};
@@ -125,7 +165,7 @@ PluginManagerWidget::PluginManagerWidget() {
 		Vec pos = Vec(0, 0);
 
 		struct DownloadProgressBar : ProgressBar {
-			void step() {
+			void step() override {
 				label = "Downloading";
 				std::string name = pluginGetDownloadName();
 				if (name != "")
@@ -142,7 +182,7 @@ PluginManagerWidget::PluginManagerWidget() {
 		pos.x += downloadProgress->box.size.x;
 
 		// struct CancelButton : Button {
-		// 	void onAction() {
+		// 	void onAction(EventAction &e) override {
 		// 		pluginCancelDownload();
 		// 	}
 		// };

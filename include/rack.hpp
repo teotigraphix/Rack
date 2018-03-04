@@ -1,13 +1,14 @@
 #pragma once
 
-#include "util.hpp"
-#include "math.hpp"
+// Include headers that plugins will likely use, for convenience
+#include "util/common.hpp"
+#include "asset.hpp"
 #include "plugin.hpp"
 #include "engine.hpp"
-#include "gui.hpp"
+#include "widgets.hpp"
 #include "app.hpp"
-#include "components.hpp"
-#include "dsp.hpp"
+#include "ui.hpp"
+#include "componentlibrary.hpp"
 
 
 namespace rack {
@@ -17,29 +18,36 @@ namespace rack {
 // helpers
 ////////////////////
 
-template <class TModuleWidget>
-Model *createModel(Plugin *plugin, std::string slug, std::string name) {
+/** Deprecated, use Model::create<TModule, TModuleWidget>(...) instead */
+template <class TModuleWidget, typename... Tags>
+DEPRECATED Model *createModel(std::string manufacturer, std::string slug, std::string name, Tags... tags) {
 	struct TModel : Model {
-		ModuleWidget *createModuleWidget() {
+		ModuleWidget *createModuleWidget() override {
 			ModuleWidget *moduleWidget = new TModuleWidget();
 			moduleWidget->model = this;
 			return moduleWidget;
 		}
 	};
 	Model *model = new TModel();
-	model->plugin = plugin;
+	model->manufacturer = manufacturer;
 	model->slug = slug;
 	model->name = name;
-	// Create bi-directional association between the Plugin and Model
-	if (plugin) {
-		plugin->models.push_back(model);
-	}
+	model->tags = {tags...};
 	return model;
 }
 
-template <class TParam>
-ParamWidget *createParam(Vec pos, Module *module, int paramId, float minValue, float maxValue, float defaultValue) {
-	ParamWidget *param = new TParam();
+/** Deprecated, use Widget::create<TScrew>() instead */
+template <class TScrew>
+DEPRECATED TScrew *createScrew(Vec pos) {
+	TScrew *screw = new TScrew();
+	screw->box.pos = pos;
+	return screw;
+}
+
+/** Deprecated, use ParamWidget::create<TParamWidget>() instead */
+template <class TParamWidget>
+DEPRECATED TParamWidget *createParam(Vec pos, Module *module, int paramId, float minValue, float maxValue, float defaultValue) {
+	TParamWidget *param = new TParamWidget();
 	param->box.pos = pos;
 	param->module = module;
 	param->paramId = paramId;
@@ -48,9 +56,10 @@ ParamWidget *createParam(Vec pos, Module *module, int paramId, float minValue, f
 	return param;
 }
 
+/** Deprecated, use Port::create<TPort>(..., Port::INPUT, ...) instead */
 template <class TPort>
-Port *createInput(Vec pos, Module *module, int inputId) {
-	Port *port = new TPort();
+DEPRECATED TPort *createInput(Vec pos, Module *module, int inputId) {
+	TPort *port = new TPort();
 	port->box.pos = pos;
 	port->module = module;
 	port->type = Port::INPUT;
@@ -58,9 +67,10 @@ Port *createInput(Vec pos, Module *module, int inputId) {
 	return port;
 }
 
+/** Deprecated, use Port::create<TPort>(..., Port::OUTPUT, ...) instead */
 template <class TPort>
-Port *createOutput(Vec pos, Module *module, int outputId) {
-	Port *port = new TPort();
+DEPRECATED TPort *createOutput(Vec pos, Module *module, int outputId) {
+	TPort *port = new TPort();
 	port->box.pos = pos;
 	port->module = module;
 	port->type = Port::OUTPUT;
@@ -68,18 +78,13 @@ Port *createOutput(Vec pos, Module *module, int outputId) {
 	return port;
 }
 
-template <class TScrew>
-Widget *createScrew(Vec pos) {
-	Widget *screw = new TScrew();
-	screw->box.pos = pos;
-	return screw;
-}
-
-template <class TLight>
-ValueLight *createValueLight(Vec pos, float *value) {
-	ValueLight *light = new TLight();
+/** Deprecated, use ModuleLightWidget::create<TModuleLightWidget>() instead */
+template<class TModuleLightWidget>
+DEPRECATED TModuleLightWidget *createLight(Vec pos, Module *module, int firstLightId) {
+	TModuleLightWidget *light = new TModuleLightWidget();
 	light->box.pos = pos;
-	light->value = value;
+	light->module = module;
+	light->firstLightId = firstLightId;
 	return light;
 }
 

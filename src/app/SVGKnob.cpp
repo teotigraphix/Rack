@@ -5,8 +5,6 @@ namespace rack {
 
 
 SVGKnob::SVGKnob() {
-	padding = Vec(1, 1);
-
 	tw = new TransformWidget();
 	addChild(tw);
 
@@ -24,8 +22,13 @@ void SVGKnob::setSVG(std::shared_ptr<SVG> svg) {
 void SVGKnob::step() {
 	// Re-transform TransformWidget if dirty
 	if (dirty) {
-		float angle = rescalef(value, minValue, maxValue, minAngle, maxAngle);
+		tw->box.size = box.size;
+		float angle = 0.0;
+		if (isfinite(minValue) && isfinite(maxValue))
+			angle = rescale(value, minValue, maxValue, minAngle, maxAngle);
 		tw->identity();
+		// Scale SVG to box
+		tw->scale(box.size.div(sw->box.size));
 		// Rotate SVG
 		Vec center = sw->box.getCenter();
 		tw->translate(center);
@@ -35,9 +38,9 @@ void SVGKnob::step() {
 	FramebufferWidget::step();
 }
 
-void SVGKnob::onChange() {
+void SVGKnob::onChange(EventChange &e) {
 	dirty = true;
-	Knob::onChange();
+	Knob::onChange(e);
 }
 
 

@@ -1,112 +1,70 @@
+#include "util/common.hpp"
 #include "engine.hpp"
-#include "gui.hpp"
+#include "window.hpp"
 #include "app.hpp"
 #include "plugin.hpp"
-
-
-#if ARCH_MAC
-#include <CoreFoundation/CoreFoundation.h>
-#include <unistd.h> // for chdir and access
-#include <libgen.h> // for dirname
-// #include <string.h>
-#include <mach-o/dyld.h> // for _NSGetExecutablePath
-#include <limits.h> // for PATH_MAX?
-#include <dirent.h> // for opendir
-
-void alert(std::string header, std::string message, int level) {
-	CFStringRef headerRef = CFStringCreateWithCString(NULL, header.c_str(), header.size());
-	CFStringRef messageRef = CFStringCreateWithCString(NULL, message.c_str(), message.size());
-	CFOptionFlags result;
-
-	CFUserNotificationDisplayAlert(
-		0, // no timeout
-		level, // flags for alert level
-		NULL, // iconURL
-		NULL, // soundURL
-		NULL, // localizationURL
-		headerRef,
-		messageRef,
-		NULL, // default "OK"
-		NULL, // alternative button
-		NULL, // other button
-		&result
-		);
-
-	CFRelease(headerRef);
-	CFRelease(messageRef);
-}
-
-bool isCorrectCwd() {
-	DIR *dir = opendir("res");
-	if (dir) {
-		closedir(dir);
-		return true;
-	}
-	else {
-		return false;
-	}
-}
-
-/** macOS workaround for setting the working directory to the location of the .app */
-void fixCwd() {
-	// Check if the cwd is already set correctly (e.g. launched from the command line or gdb)
-	if (isCorrectCwd())
-		return;
-
-/*
-	// Get path of binary inside the app bundle
-	// It should be something like .../Rack.app/Contents/MacOS
-	char path[PATH_MAX];
-	uint32_t pathLen = sizeof(path);
-	int err = _NSGetExecutablePath(path, &pathLen);
-	assert(!err);
-	if (isCorrectCwd())
-		return;
-
-	// Switch to the directory of the actual binary
-	chdir(dirname(path));
-	if (isCorrectCwd())
-		return;
-
-	// and then go up three directories to get to the parent directory
-	chdir("../../../");
-	if (isCorrectCwd())
-		return;
-*/
-
-	// Switch to a default absolute path
-	chdir("/Applications/Rack");
-	if (isCorrectCwd())
-		return;
-
-	alert("Install Rack", "To install Rack, please move the Rack directory (including the Rack app and plugins directory) to the /Applications folder.", 2);
-	exit(1);
-}
-#endif
+#include "settings.hpp"
+#include "asset.hpp"
+#include <unistd.h>
+#include "osdialog.h"
 
 
 using namespace rack;
 
-int main() {
-#if ARCH_MAC
-	fixCwd();
+int main(int argc, char* argv[]) {
+	randomInit();
+
+#ifdef RELEASE
+	std::string logFilename = assetLocal("log.txt");
+	gLogFile = fopen(logFilename.c_str(), "w");
 #endif
+
+	info("Rack v%s", gApplicationVersion.c_str());
+
+	{
+		char *cwd = getcwd(NULL, 0);
+		info("Current working directory: %s", cwd);
+		free(cwd);
+		std::string globalDir = assetGlobal("");
+		std::string localDir = assetLocal("");
+		info("Global directory: %s", globalDir.c_str());
+		info("Local directory: %s", localDir.c_str());
+	}
 
 	pluginInit();
 	engineInit();
-	guiInit();
-	sceneInit();
-	gRackWidget->loadPatch("autosave.json");
+	windowInit();
+	appInit();
+	settingsLoad(assetLocal("settings.json"));
+	std::string oldLastPath = gRackWidget->lastPath;
+
+	// To prevent launch crashes, if Rack crashes between now and 15 seconds from now, the "skipAutosaveOnLaunch" property will remain in settings.json, so that in the next launch, the broken autosave will not be loaded.
+	bool oldSkipAutosaveOnLaunch = skipAutosaveOnLaunch;
+	skipAutosaveOnLaunch = true;
+	settingsSave(assetLocal("settings.json"));
+	skipAutosaveOnLaunch = false;
+	if (oldSkipAutosaveOnLaunch && osdialog_message(OSDIALOG_INFO, OSDIALOG_YES_NO, "Rack has recovered from a crash, possibly caused by a faulty module in your patch. Would you like to clear your patch and start over?")) {
+		// Do nothing. Empty patch is already loaded.
+	}
+	else {
+		gRackWidget->loadPatch(assetLocal("autosave.vcv"));
+	}
+	gRackWidget->lastPath = oldLastPath;
 
 	engineStart();
-	guiRun();
+	windowRun();
 	engineStop();
 
-	gRackWidget->savePatch("autosave.json");
-	sceneDestroy();
-	guiDestroy();
+	gRackWidget->savePatch(assetLocal("autosave.vcv"));
+	settingsSave(assetLocal("settings.json"));
+	appDestroy();
+	windowDestroy();
 	engineDestroy();
 	pluginDestroy();
+
+#ifdef RELEASE
+	fclose(gLogFile);
+#endif
+
 	return 0;
 }
-

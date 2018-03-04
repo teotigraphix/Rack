@@ -1,10 +1,14 @@
-# All paths here assume the PWD is plugin/something
+RACK_DIR ?= ../..
 
 FLAGS += -fPIC \
-	-I../../include -I../../dep/include
+	-I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include
+
+ifdef SLUG
+	FLAGS += -DSLUG=$(SLUG)
+endif
 
 
-include ../../arch.mk
+include $(RACK_DIR)/arch.mk
 
 ifeq ($(ARCH), lin)
 	LDFLAGS += -shared
@@ -17,14 +21,24 @@ ifeq ($(ARCH), mac)
 endif
 
 ifeq ($(ARCH), win)
-	LDFLAGS += -shared -L../../ -lRack
+	LDFLAGS += -shared -L$(RACK_DIR) -lRack
 	TARGET = plugin.dll
 endif
+
+DISTRIBUTABLES += $(TARGET)
 
 
 all: $(TARGET)
 
-clean:
-	rm -rfv build $(TARGET)
+include $(RACK_DIR)/compile.mk
 
-include ../../compile.mk
+clean:
+	rm -rfv build $(TARGET) dist
+
+dist: all
+	rm -rf dist
+	mkdir -p dist/$(SLUG)
+	cp -R $(DISTRIBUTABLES) dist/$(SLUG)/
+	cd dist && zip -5 -r $(SLUG)-$(VERSION)-$(ARCH).zip $(SLUG)
+
+.PHONY: clean dist

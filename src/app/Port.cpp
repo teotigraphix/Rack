@@ -1,104 +1,126 @@
 #include "app.hpp"
+#include "window.hpp"
+#include "engine.hpp"
+#include "componentlibrary.hpp"
 
 
 namespace rack {
 
+
+struct PlugLight : MultiLightWidget {
+	PlugLight() {
+		addBaseColor(COLOR_GREEN);
+		addBaseColor(COLOR_RED);
+		box.size = Vec(8, 8);
+		bgColor = COLOR_BLACK_TRANSPARENT;
+	}
+};
+
+
 Port::Port() {
-	box.size = Vec(20, 20);
+	plugLight = new PlugLight();
 }
 
 Port::~Port() {
-	disconnect();
+	// plugLight is not a child and is thus owned by the Port, so we need to delete it here
+	delete plugLight;
+	gRackWidget->wireContainer->removeAllWires(this);
 }
 
-void Port::disconnect() {
-	if (connectedWire) {
-		gRackWidget->wireContainer->removeChild(connectedWire);
-		// On destruction, Wire automatically sets connectedWire to NULL
-		delete connectedWire;
+void Port::step() {
+	std::vector<float> values(2);
+	if (type == INPUT) {
+		values[0] = module->inputs[portId].plugLights[0].getBrightness();
+		values[1] = module->inputs[portId].plugLights[1].getBrightness();
 	}
+	else {
+		values[0] = module->outputs[portId].plugLights[0].getBrightness();
+		values[1] = module->outputs[portId].plugLights[1].getBrightness();
+	}
+	plugLight->setValues(values);
 }
 
 void Port::draw(NVGcontext *vg) {
-	if (gRackWidget->activeWire) {
+	WireWidget *activeWire = gRackWidget->wireContainer->activeWire;
+	if (activeWire) {
 		// Dim the Port if the active wire cannot plug into this Port
-		if (type == INPUT ? gRackWidget->activeWire->inputPort : gRackWidget->activeWire->outputPort)
+		if (type == INPUT ? activeWire->inputPort : activeWire->outputPort)
 			nvgGlobalAlpha(vg, 0.5);
 	}
 }
 
-void Port::onMouseDown(int button) {
-	if (button == 1) {
-		disconnect();
+void Port::onMouseDown(EventMouseDown &e) {
+	if (e.button == 1) {
+		gRackWidget->wireContainer->removeTopWire(this);
+
+		// HACK
+		// Update hovered*Port of active wire if applicable
+		EventDragEnter e;
+		onDragEnter(e);
 	}
+	e.consumed = true;
+	e.target = this;
 }
 
-void Port::onDragEnd() {
-	WireWidget *w = gRackWidget->activeWire;
-	assert(w);
-	w->updateWire();
-	if (!w->wire) {
-		gRackWidget->wireContainer->removeChild(w);
-		delete w;
+void Port::onDragStart(EventDragStart &e) {
+	// Try to grab wire on top of stack
+	WireWidget *wire = gRackWidget->wireContainer->getTopWire(this);
+	if (type == OUTPUT && windowIsModPressed()) {
+		wire = NULL;
 	}
-	gRackWidget->activeWire = NULL;
-}
 
-void Port::onDragStart() {
-	if (connectedWire) {
-		// Disconnect wire from this port, but set it as the active wire
+	if (wire) {
+		// Disconnect existing wire
 		if (type == INPUT)
-			connectedWire->inputPort = NULL;
+			wire->inputPort = NULL;
 		else
-			connectedWire->outputPort = NULL;
-		connectedWire->updateWire();
-		gRackWidget->activeWire = connectedWire;
-		connectedWire = NULL;
+			wire->outputPort = NULL;
+		wire->updateWire();
 	}
 	else {
-		connectedWire = new WireWidget();
+		// Create a new wire
+		wire = new WireWidget();
 		if (type == INPUT)
-			connectedWire->inputPort = this;
+			wire->inputPort = this;
 		else
-			connectedWire->outputPort = this;
-		gRackWidget->wireContainer->addChild(connectedWire);
-		gRackWidget->activeWire = connectedWire;
+			wire->outputPort = this;
+	}
+	gRackWidget->wireContainer->setActiveWire(wire);
+}
+
+void Port::onDragEnd(EventDragEnd &e) {
+	// FIXME
+	// If the source Port is deleted, this will be called, removing the cable
+	gRackWidget->wireContainer->commitActiveWire();
+}
+
+void Port::onDragDrop(EventDragDrop &e) {
+}
+
+void Port::onDragEnter(EventDragEnter &e) {
+	// Reject ports if this is an input port and something is already plugged into it
+	if (type == INPUT) {
+		WireWidget *topWire = gRackWidget->wireContainer->getTopWire(this);
+		if (topWire)
+			return;
+	}
+
+	WireWidget *activeWire = gRackWidget->wireContainer->activeWire;
+	if (activeWire) {
+		if (type == INPUT)
+			activeWire->hoveredInputPort = this;
+		else
+			activeWire->hoveredOutputPort = this;
 	}
 }
 
-void Port::onDragDrop(Widget *origin) {
-	if (connectedWire) return;
-	if (gRackWidget->activeWire) {
-		if (type == INPUT) {
-			gRackWidget->activeWire->hoveredInputPort = NULL;
-			if (gRackWidget->activeWire->inputPort) return;
-			gRackWidget->activeWire->inputPort = this;
-		}
-		else {
-			gRackWidget->activeWire->hoveredOutputPort = NULL;
-			if (gRackWidget->activeWire->outputPort) return;
-			gRackWidget->activeWire->outputPort = this;
-		}
-		connectedWire = gRackWidget->activeWire;
-	}
-}
-
-void Port::onDragEnter(Widget *origin) {
-	if (connectedWire) return;
-	if (gRackWidget->activeWire) {
+void Port::onDragLeave(EventDragEnter &e) {
+	WireWidget *activeWire = gRackWidget->wireContainer->activeWire;
+	if (activeWire) {
 		if (type == INPUT)
-			gRackWidget->activeWire->hoveredInputPort = this;
+			activeWire->hoveredInputPort = NULL;
 		else
-			gRackWidget->activeWire->hoveredOutputPort = this;
-	}
-}
-
-void Port::onDragLeave(Widget *origin) {
-	if (gRackWidget->activeWire) {
-		if (type == INPUT)
-			gRackWidget->activeWire->hoveredInputPort = NULL;
-		else
-			gRackWidget->activeWire->hoveredOutputPort = NULL;
+			activeWire->hoveredOutputPort = NULL;
 	}
 }
 

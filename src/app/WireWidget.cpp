@@ -1,5 +1,7 @@
 #include "app.hpp"
 #include "engine.hpp"
+#include "componentlibrary.hpp"
+#include "window.hpp"
 
 
 namespace rack {
@@ -9,7 +11,7 @@ static void drawPlug(NVGcontext *vg, Vec pos, NVGcolor color) {
 
 	// Plug solid
 	nvgBeginPath(vg);
-	nvgCircle(vg, pos.x, pos.y, 9.5);
+	nvgCircle(vg, pos.x, pos.y, 9);
 	nvgFillColor(vg, color);
 	nvgFill(vg);
 
@@ -20,7 +22,7 @@ static void drawPlug(NVGcontext *vg, Vec pos, NVGcolor color) {
 
 	// Hole
 	nvgBeginPath(vg);
-	nvgCircle(vg, pos.x, pos.y, 5.5);
+	nvgCircle(vg, pos.x, pos.y, 5);
 	nvgFillColor(vg, nvgRGBf(0.0, 0.0, 0.0));
 	nvgFill(vg);
 }
@@ -68,99 +70,133 @@ static void drawWire(NVGcontext *vg, Vec pos1, Vec pos2, NVGcolor color, float t
 }
 
 
-static const NVGcolor wireColors[6] = {
+static const NVGcolor wireColors[] = {
 	nvgRGB(0xc9, 0xb7, 0x0e), // yellow
 	nvgRGB(0xc9, 0x18, 0x47), // red
 	nvgRGB(0x0c, 0x8e, 0x15), // green
 	nvgRGB(0x09, 0x86, 0xad), // blue
-	nvgRGB(0x44, 0x44, 0x44), // black
+	// nvgRGB(0x44, 0x44, 0x44), // black
 	// nvgRGB(0x66, 0x66, 0x66), // gray
 	// nvgRGB(0x88, 0x88, 0x88), // light gray
-	nvgRGB(0xaa, 0xaa, 0xaa), // white
+	// nvgRGB(0xaa, 0xaa, 0xaa), // white
 };
 static int lastWireColorId = -1;
 
 
 WireWidget::WireWidget() {
-	lastWireColorId = (lastWireColorId + 1) % 6;
+	lastWireColorId = (lastWireColorId + 1) % LENGTHOF(wireColors);
 	color = wireColors[lastWireColorId];
 }
 
 WireWidget::~WireWidget() {
-	if (outputPort) {
-		outputPort->connectedWire = NULL;
-		outputPort = NULL;
-	}
-	if (inputPort) {
-		inputPort->connectedWire = NULL;
-		inputPort = NULL;
-	}
+	outputPort = NULL;
+	inputPort = NULL;
 	updateWire();
 }
 
 void WireWidget::updateWire() {
-	if (wire) {
-		engineRemoveWire(wire);
-		delete wire;
-		wire = NULL;
-	}
 	if (inputPort && outputPort) {
 		// Check correct types
 		assert(inputPort->type == Port::INPUT);
 		assert(outputPort->type == Port::OUTPUT);
 
-		wire = new Wire();
-		wire->outputModule = outputPort->module;
-		wire->outputId = outputPort->portId;
-		wire->inputModule = inputPort->module;
-		wire->inputId = inputPort->portId;
-		engineAddWire(wire);
+		if (!wire) {
+			wire = new Wire();
+			wire->outputModule = outputPort->module;
+			wire->outputId = outputPort->portId;
+			wire->inputModule = inputPort->module;
+			wire->inputId = inputPort->portId;
+			engineAddWire(wire);
+		}
+	}
+	else {
+		if (wire) {
+			engineRemoveWire(wire);
+			delete wire;
+			wire = NULL;
+		}
 	}
 }
 
 Vec WireWidget::getOutputPos() {
-	Vec pos;
 	if (outputPort) {
-		pos = Rect(outputPort->getAbsolutePos(), outputPort->box.size).getCenter();
+		return outputPort->getRelativeOffset(outputPort->box.zeroPos().getCenter(), gRackWidget);
 	}
 	else if (hoveredOutputPort) {
-		pos = Rect(hoveredOutputPort->getAbsolutePos(), hoveredOutputPort->box.size).getCenter();
+		return hoveredOutputPort->getRelativeOffset(hoveredOutputPort->box.zeroPos().getCenter(), gRackWidget);
 	}
 	else {
-		pos = gMousePos;
+		return gRackWidget->lastMousePos;
 	}
-	return pos.minus(getAbsolutePos().minus(box.pos));
 }
 
 Vec WireWidget::getInputPos() {
-	Vec pos;
 	if (inputPort) {
-		pos = Rect(inputPort->getAbsolutePos(), inputPort->box.size).getCenter();
+		return inputPort->getRelativeOffset(inputPort->box.zeroPos().getCenter(), gRackWidget);
 	}
 	else if (hoveredInputPort) {
-		pos = Rect(hoveredInputPort->getAbsolutePos(), hoveredInputPort->box.size).getCenter();
+		return hoveredInputPort->getRelativeOffset(hoveredInputPort->box.zeroPos().getCenter(), gRackWidget);
 	}
 	else {
-		pos = gMousePos;
+		return gRackWidget->lastMousePos;
 	}
-	return pos.minus(getAbsolutePos().minus(box.pos));
+}
+
+json_t *WireWidget::toJson() {
+	json_t *rootJ = json_object();
+	json_object_set_new(rootJ, "color", colorToJson(color));
+	return rootJ;
+}
+
+void WireWidget::fromJson(json_t *rootJ) {
+	json_t *colorJ = json_object_get(rootJ, "color");
+	if (colorJ)
+		color = jsonToColor(colorJ);
 }
 
 void WireWidget::draw(NVGcontext *vg) {
-	float opacity = dynamic_cast<RackScene*>(gScene)->toolbar->wireOpacitySlider->value / 100.0;
-	float tension = dynamic_cast<RackScene*>(gScene)->toolbar->wireTensionSlider->value;
+	float opacity = gToolbar->wireOpacitySlider->value / 100.0;
+	float tension = gToolbar->wireTensionSlider->value;
 
-	// Display the actively dragged wire as opaque
-	if (gRackWidget->activeWire == this)
-		opacity = 1.0;
+	WireWidget *activeWire = gRackWidget->wireContainer->activeWire;
+	if (activeWire) {
+		// Draw as opaque if the wire is active
+		if (activeWire == this)
+			opacity = 1.0;
+	}
+	else {
+		Port *hoveredPort = dynamic_cast<Port*>(gHoveredWidget);
+		if (hoveredPort && (hoveredPort == outputPort || hoveredPort == inputPort))
+			opacity = 1.0;
+	}
 
-	drawWire(vg, getOutputPos(), getInputPos(), color, tension, opacity);
-	drawPlug(vg, getOutputPos(), color);
-	drawPlug(vg, getInputPos(), color);
+	Vec outputPos = getOutputPos();
+	Vec inputPos = getInputPos();
+	drawWire(vg, outputPos, inputPos, color, tension, opacity);
 }
 
 void WireWidget::drawPlugs(NVGcontext *vg) {
 	// TODO Figure out a way to draw plugs first and wires last, and cut the plug portion of the wire off.
+	Vec outputPos = getOutputPos();
+	Vec inputPos = getInputPos();
+	drawPlug(vg, outputPos, color);
+	drawPlug(vg, inputPos, color);
+
+	// Draw plug light
+	// TODO
+	// Only draw this when light is on top of the plug stack
+	if (outputPort) {
+		nvgSave(vg);
+		nvgTranslate(vg, outputPos.x - 4, outputPos.y - 4);
+		outputPort->plugLight->draw(vg);
+		nvgRestore(vg);
+	}
+	if (inputPort) {
+		nvgSave(vg);
+		nvgTranslate(vg, inputPos.x - 4, inputPos.y - 4);
+		inputPort->plugLight->draw(vg);
+		nvgRestore(vg);
+	}
 }
 
 

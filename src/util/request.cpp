@@ -1,9 +1,10 @@
+#include "util/common.hpp"
 #include "util/request.hpp"
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
 #include <curl/curl.h>
+#include <openssl/sha.h>
 
+
+namespace rack {
 
 static size_t writeStringCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
 	std::string *str = (std::string*) userdata;
@@ -15,18 +16,13 @@ static size_t writeStringCallback(char *ptr, size_t size, size_t nmemb, void *us
 
 json_t *requestJson(RequestMethod method, std::string url, json_t *dataJ) {
 	CURL *curl = curl_easy_init();
-	if (!curl)
-		return NULL;
+	assert(curl);
 
-	assert(dataJ);
-	char *reqStr;
-	if (method != GET_METHOD) {
-		reqStr = json_dumps(dataJ, 0);
-	}
+	char *reqStr = NULL;
 
-	// Set URL
-	if (method == GET_METHOD) {
-		if (dataJ) {
+	// Process data
+	if (dataJ) {
+		if (method == METHOD_GET) {
 			// Append ?key=value&... to url
 			url += "?";
 			bool isFirst = true;
@@ -47,21 +43,25 @@ json_t *requestJson(RequestMethod method, std::string url, json_t *dataJ) {
 				}
 			}
 		}
+		else {
+			reqStr = json_dumps(dataJ, 0);
+		}
 	}
+
 	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
 	// Set HTTP method
 	switch (method) {
-		case GET_METHOD:
-			// This is default
+		case METHOD_GET:
+			// This is CURL's default
 			break;
-		case POST_METHOD:
+		case METHOD_POST:
 			curl_easy_setopt(curl, CURLOPT_POST, true);
 			break;
-		case PUT_METHOD:
+		case METHOD_PUT:
 			curl_easy_setopt(curl, CURLOPT_PUT, true);
 			break;
-		case DELETE_METHOD:
+		case METHOD_DELETE:
 			curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
 			break;
 	}
@@ -73,20 +73,21 @@ json_t *requestJson(RequestMethod method, std::string url, json_t *dataJ) {
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
 	// Body callbacks
-	if (method != GET_METHOD)
+	if (reqStr)
 		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, reqStr);
 
 	std::string resText;
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, false);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeStringCallback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resText);
 
 	// Perform request
-	printf("Requesting %s\n", url.c_str());
+	// info("Requesting %s", url.c_str());
 	// curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 	CURLcode res = curl_easy_perform(curl);
 
 	// Cleanup
-	if (method != GET_METHOD)
+	if (reqStr)
 		free(reqStr);
 	curl_easy_cleanup(curl);
 	curl_slist_free_all(headers);
@@ -100,11 +101,6 @@ json_t *requestJson(RequestMethod method, std::string url, json_t *dataJ) {
 	return NULL;
 }
 
-
-static size_t writeFileCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
-	FILE *file = (FILE*) userdata;
-	return fwrite(ptr, size, nmemb, file);
-}
 
 static int xferInfoCallback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
 	float *progress = (float*) clientp;
@@ -133,8 +129,10 @@ bool requestDownload(std::string url, std::string filename, float *progress) {
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
 	curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferInfoCallback);
 	curl_easy_setopt(curl, CURLOPT_XFERINFODATA, progress);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, true);
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, false);
 
-	printf("Downloading %s\n", url.c_str());
+	info("Downloading %s", url.c_str());
 	CURLcode res = curl_easy_perform(curl);
 	curl_easy_cleanup(curl);
 
@@ -145,3 +143,47 @@ bool requestDownload(std::string url, std::string filename, float *progress) {
 
 	return res == CURLE_OK;
 }
+
+std::string requestEscape(std::string s) {
+	CURL *curl = curl_easy_init();
+	assert(curl);
+	char *escaped = curl_easy_escape(curl, s.c_str(), s.size());
+	std::string ret = escaped;
+	curl_free(escaped);
+	curl_easy_cleanup(curl);
+	return ret;
+}
+
+std::string requestSHA256File(std::string filename) {
+	FILE *f = fopen(filename.c_str(), "rb");
+	if (!f)
+		return "";
+
+	uint8_t hash[SHA256_DIGEST_LENGTH];
+	SHA256_CTX sha256;
+	SHA256_Init(&sha256);
+	const int bufferLen = 1 << 15;
+	uint8_t *buffer = new uint8_t[bufferLen];
+	int len = 0;
+	while ((len = fread(buffer, 1, bufferLen, f))) {
+		SHA256_Update(&sha256, buffer, len);
+	}
+	SHA256_Final(hash, &sha256);
+	delete[] buffer;
+	fclose(f);
+
+	// Convert binary hash to hex
+	char hashHex[64];
+	const char hexTable[] = "0123456789abcdef";
+	for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+		uint8_t h = hash[i];
+		hashHex[2*i + 0] = hexTable[h >> 4];
+		hashHex[2*i + 1] = hexTable[h & 0x0f];
+	}
+
+	std::string str(hashHex, sizeof(hashHex));
+	return str;
+}
+
+
+} // namespace rack
