@@ -14,19 +14,17 @@
 
 namespace rack {
 
-float sampleRate;
-float sampleTime;
 bool gPaused = false;
-
+std::vector<Module*> gModules;
+std::vector<Wire*> gWires;
 
 static bool running = false;
+static float sampleRate;
+static float sampleTime;
 
 static std::mutex mutex;
 static std::thread thread;
 static VIPMutex vipMutex;
-
-static std::vector<Module*> modules;
-static std::vector<Wire*> wires;
 
 // Parameter interpolation
 static Module *smoothModule = NULL;
@@ -35,7 +33,9 @@ static float smoothValue;
 
 
 float Light::getBrightness() {
-	return sqrtf(fmaxf(0.f, value));
+	// LEDs are diodes, so don't allow reverse current.
+	// For some reason, instead of the RMS, the sqrt of RMS looks better
+	return powf(fmaxf(0.f, value), 0.25f);
 }
 
 void Light::setBrightnessSmooth(float brightness, float frames) {
@@ -63,8 +63,8 @@ void engineInit() {
 
 void engineDestroy() {
 	// Make sure there are no wires or modules in the rack on destruction. This suggests that a module failed to remove itself before the WINDOW was destroyed.
-	assert(wires.empty());
-	assert(modules.empty());
+	assert(gWires.empty());
+	assert(gModules.empty());
 }
 
 static void engineStep() {
@@ -85,21 +85,21 @@ static void engineStep() {
 	}
 
 	// Step modules
-	for (Module *module : modules) {
+	for (Module *module : gModules) {
 		module->step();
 
 		// TODO skip this step when plug lights are disabled
 		// Step ports
 		for (Input &input : module->inputs) {
 			if (input.active) {
-				float value = input.value / 10.f;
+				float value = input.value / 5.f;
 				input.plugLights[0].setBrightnessSmooth(value);
 				input.plugLights[1].setBrightnessSmooth(-value);
 			}
 		}
 		for (Output &output : module->outputs) {
 			if (output.active) {
-				float value = output.value / 10.f;
+				float value = output.value / 5.f;
 				output.plugLights[0].setBrightnessSmooth(value);
 				output.plugLights[1].setBrightnessSmooth(-value);
 			}
@@ -107,7 +107,7 @@ static void engineStep() {
 	}
 
 	// Step cables by moving their output values to inputs
-	for (Wire *wire : wires) {
+	for (Wire *wire : gWires) {
 		wire->step();
 	}
 }
@@ -166,9 +166,9 @@ void engineAddModule(Module *module) {
 	VIPLock vipLock(vipMutex);
 	std::lock_guard<std::mutex> lock(mutex);
 	// Check that the module is not already added
-	auto it = std::find(modules.begin(), modules.end(), module);
-	assert(it == modules.end());
-	modules.push_back(module);
+	auto it = std::find(gModules.begin(), gModules.end(), module);
+	assert(it == gModules.end());
+	gModules.push_back(module);
 }
 
 void engineRemoveModule(Module *module) {
@@ -180,20 +180,20 @@ void engineRemoveModule(Module *module) {
 		smoothModule = NULL;
 	}
 	// Check that all wires are disconnected
-	for (Wire *wire : wires) {
+	for (Wire *wire : gWires) {
 		assert(wire->outputModule != module);
 		assert(wire->inputModule != module);
 	}
 	// Check that the module actually exists
-	auto it = std::find(modules.begin(), modules.end(), module);
-	assert(it != modules.end());
+	auto it = std::find(gModules.begin(), gModules.end(), module);
+	assert(it != gModules.end());
 	// Remove it
-	modules.erase(it);
+	gModules.erase(it);
 }
 
 static void updateActive() {
 	// Set everything to inactive
-	for (Module *module : modules) {
+	for (Module *module : gModules) {
 		for (Input &input : module->inputs) {
 			input.active = false;
 		}
@@ -202,7 +202,7 @@ static void updateActive() {
 		}
 	}
 	// Set inputs/outputs to active
-	for (Wire *wire : wires) {
+	for (Wire *wire : gWires) {
 		wire->outputModule->outputs[wire->outputId].active = true;
 		wire->inputModule->inputs[wire->inputId].active = true;
 	}
@@ -216,12 +216,12 @@ void engineAddWire(Wire *wire) {
 	assert(wire->outputModule);
 	assert(wire->inputModule);
 	// Check that the wire is not already added, and that the input is not already used by another cable
-	for (Wire *wire2 : wires) {
+	for (Wire *wire2 : gWires) {
 		assert(wire2 != wire);
 		assert(!(wire2->inputModule == wire->inputModule && wire2->inputId == wire->inputId));
 	}
 	// Add the wire
-	wires.push_back(wire);
+	gWires.push_back(wire);
 	updateActive();
 }
 
@@ -230,12 +230,12 @@ void engineRemoveWire(Wire *wire) {
 	VIPLock vipLock(vipMutex);
 	std::lock_guard<std::mutex> lock(mutex);
 	// Check that the wire is already added
-	auto it = std::find(wires.begin(), wires.end(), wire);
-	assert(it != wires.end());
+	auto it = std::find(gWires.begin(), gWires.end(), wire);
+	assert(it != gWires.end());
 	// Set input to 0V
 	wire->inputModule->inputs[wire->inputId].value = 0.0;
 	// Remove the wire
-	wires.erase(it);
+	gWires.erase(it);
 	updateActive();
 }
 
@@ -261,7 +261,7 @@ void engineSetSampleRate(float newSampleRate) {
 	sampleRate = newSampleRate;
 	sampleTime = 1.0 / sampleRate;
 	// onSampleRateChange
-	for (Module *module : modules) {
+	for (Module *module : gModules) {
 		module->onSampleRateChange();
 	}
 }

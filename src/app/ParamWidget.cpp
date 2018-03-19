@@ -23,7 +23,7 @@ void ParamWidget::reset() {
 }
 
 void ParamWidget::randomize() {
-	if (randomizable)
+	if (randomizable && isfinite(minValue) && isfinite(maxValue))
 		setValue(rescale(randomUniform(), 0.0, 1.0, minValue, maxValue));
 }
 

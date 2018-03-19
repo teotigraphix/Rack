@@ -5,6 +5,7 @@
 #include "plugin.hpp"
 #include "settings.hpp"
 #include "asset.hpp"
+#include "bridge.hpp"
 #include <unistd.h>
 #include "osdialog.h"
 
@@ -19,7 +20,7 @@ int main(int argc, char* argv[]) {
 	gLogFile = fopen(logFilename.c_str(), "w");
 #endif
 
-	info("Rack v%s", gApplicationVersion.c_str());
+	info("Rack %s", gApplicationVersion.c_str());
 
 	{
 		char *cwd = getcwd(NULL, 0);
@@ -33,6 +34,7 @@ int main(int argc, char* argv[]) {
 
 	pluginInit();
 	engineInit();
+	bridgeInit();
 	windowInit();
 	appInit();
 	settingsLoad(assetLocal("settings.json"));
@@ -59,6 +61,7 @@ int main(int argc, char* argv[]) {
 	settingsSave(assetLocal("settings.json"));
 	appDestroy();
 	windowDestroy();
+	bridgeDestroy();
 	engineDestroy();
 	pluginDestroy();
 

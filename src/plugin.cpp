@@ -103,7 +103,7 @@ static int loadPlugin(std::string path) {
 	// Reject plugin if slug already exists
 	for (Plugin *p : gPlugins) {
 		if (plugin->slug == p->slug) {
-			warn("Plugin \"%s\" is already loaded, not attempting to load it again");
+			warn("Plugin \"%s\" is already loaded, not attempting to load it again", p->slug.c_str());
 			// TODO
 			// Fix memory leak with `plugin` here
 			return -1;
@@ -268,7 +268,7 @@ static bool syncPlugin(json_t *pluginJ, bool dryRun) {
 	std::string zipPath = pluginPath + ".zip";
 	bool success = requestDownload(download, zipPath, &downloadProgress);
 	if (!success) {
-		warn("Plugin %s download was unsuccessful");
+		warn("Plugin %s download was unsuccessful", slug.c_str());
 		return false;
 	}
 
@@ -384,24 +384,25 @@ bool pluginSync(bool dryRun) {
 
 void pluginInit() {
 	tagsInit();
+
+	// TODO
+	// If `<local>/plugins/Fundamental` doesn't exist, unzip global Fundamental.zip package into `<local>/plugins`
+
+	// TODO
+	// Find all ZIP packages in `<local>/plugins` and unzip them.
+	// Display error if failure
+
 	// Load core
 	// This function is defined in core.cpp
-	Plugin *coreManufacturer = new Plugin();
-	init(coreManufacturer);
-	gPlugins.push_back(coreManufacturer);
-
-	// Load plugins from global directory
-	std::string globalPlugins = assetGlobal("plugins");
-	info("Loading plugins from %s", globalPlugins.c_str());
-	loadPlugins(globalPlugins);
+	Plugin *corePlugin = new Plugin();
+	init(corePlugin);
+	gPlugins.push_back(corePlugin);
 
 	// Load plugins from local directory
 	std::string localPlugins = assetLocal("plugins");
-	if (globalPlugins != localPlugins) {
-		mkdir(localPlugins.c_str(), 0755);
-		info("Loading plugins from %s", localPlugins.c_str());
-		loadPlugins(localPlugins);
-	}
+	mkdir(localPlugins.c_str(), 0755);
+	info("Loading plugins from %s", localPlugins.c_str());
+	loadPlugins(localPlugins);
 }
 
 void pluginDestroy() {

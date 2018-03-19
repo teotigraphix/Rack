@@ -18,8 +18,6 @@
 #define OUTPUTS 8
 #define INPUTS 8
 
-static const auto audioTimeout = std::chrono::milliseconds(100);
-
 
 using namespace rack;
 
@@ -33,53 +31,65 @@ struct AudioInterfaceIO : AudioIO {
 	DoubleRingBuffer<Frame<INPUTS>, (1<<15)> inputBuffer;
 	// Audio thread consumes, engine thread produces
 	DoubleRingBuffer<Frame<OUTPUTS>, (1<<15)> outputBuffer;
-
-	AudioInterfaceIO() {
-	}
+	bool active = false;
 
 	~AudioInterfaceIO() {
 		// Close stream here before destructing AudioInterfaceIO, so the mutexes are still valid when waiting to close.
 		setDevice(-1, 0);
 	}
 
-	void processStream(const float *input, float *output, int length) override {
+	void processStream(const float *input, float *output, int frames) override {
+		// Reactivate idle stream
+		if (!active) {
+			active = true;
+			inputBuffer.clear();
+			outputBuffer.clear();
+		}
+
 		if (numInputs > 0) {
 			// TODO Do we need to wait on the input to be consumed here? Experimentally, it works fine if we don't.
-			for (int i = 0; i < length; i++) {
+			for (int i = 0; i < frames; i++) {
 				if (inputBuffer.full())
 					break;
-				Frame<INPUTS> f;
-				memset(&f, 0, sizeof(f));
-				memcpy(&f, &input[numInputs * i], numInputs * sizeof(float));
-				inputBuffer.push(f);
+				Frame<INPUTS> inputFrame;
+				memset(&inputFrame, 0, sizeof(inputFrame));
+				memcpy(&inputFrame, &input[numInputs * i], numInputs * sizeof(float));
+				inputBuffer.push(inputFrame);
 			}
 		}
 
 		if (numOutputs > 0) {
 			std::unique_lock<std::mutex> lock(audioMutex);
 			auto cond = [&] {
-				return outputBuffer.size() >= length;
+				return (outputBuffer.size() >= (size_t) frames);
 			};
-			if (audioCv.wait_for(lock, audioTimeout, cond)) {
+			auto timeout = std::chrono::milliseconds(100);
+			if (audioCv.wait_for(lock, timeout, cond)) {
 				// Consume audio block
-				for (int i = 0; i < length; i++) {
+				for (int i = 0; i < frames; i++) {
 					Frame<OUTPUTS> f = outputBuffer.shift();
-					memcpy(&output[numOutputs * i], &f, numOutputs * sizeof(float));
+					for (int j = 0; j < numOutputs; j++) {
+						output[numOutputs*i + j] = clamp(f.samples[j], -1.f, 1.f);
+					}
 				}
 			}
 			else {
 				// Timed out, fill output with zeros
-				memset(output, 0, length * numOutputs * sizeof(float));
+				memset(output, 0, frames * numOutputs * sizeof(float));
+				debug("Audio Interface IO underflow");
 			}
 		}
 
 		// Notify engine when finished processing
-		engineCv.notify_all();
+		engineCv.notify_one();
 	}
 
 	void onCloseStream() override {
 		inputBuffer.clear();
 		outputBuffer.clear();
+	}
+
+	void onChannelsChange() override {
 	}
 };
 
@@ -130,12 +140,6 @@ struct AudioInterface : Module {
 	}
 
 	void onSampleRateChange() override {
-		// for (int i = 0; i < INPUTS; i++) {
-		// 	inputSrc[i].setRates(audioIO.sampleRate, engineGetSampleRate());
-		// }
-		// for (int i = 0; i < OUTPUTS; i++) {
-		// 	outputSrc[i].setRates(engineGetSampleRate(), audioIO.sampleRate);
-		// }
 		inputSrc.setRates(audioIO.sampleRate, engineGetSampleRate());
 		outputSrc.setRates(engineGetSampleRate(), audioIO.sampleRate);
 	}
@@ -147,49 +151,68 @@ struct AudioInterface : Module {
 
 
 void AudioInterface::step() {
-	Frame<INPUTS> inputFrame;
-	memset(&inputFrame, 0, sizeof(inputFrame));
-
 	// Update sample rate if changed by audio driver
 	if (audioIO.sampleRate != lastSampleRate) {
 		onSampleRateChange();
 		lastSampleRate = audioIO.sampleRate;
 	}
 
-	if (audioIO.numInputs > 0) {
-		if (inputBuffer.empty()) {
+	// Inputs: audio engine -> rack engine
+	if (audioIO.active && audioIO.numInputs > 0) {
+		// Wait until inputs are present
+		// Give up after a timeout in case the audio device is being unresponsive.
+		std::unique_lock<std::mutex> lock(audioIO.engineMutex);
+		auto cond = [&] {
+			return (!audioIO.inputBuffer.empty());
+		};
+		auto timeout = std::chrono::milliseconds(200);
+		if (audioIO.engineCv.wait_for(lock, timeout, cond)) {
+			// Convert inputs
 			int inLen = audioIO.inputBuffer.size();
 			int outLen = inputBuffer.capacity();
 			inputSrc.process(audioIO.inputBuffer.startData(), &inLen, inputBuffer.endData(), &outLen);
 			audioIO.inputBuffer.startIncr(inLen);
 			inputBuffer.endIncr(outLen);
 		}
+		else {
+			// Give up on pulling input
+			audioIO.active = false;
+			debug("Audio Interface underflow");
+		}
 	}
 
+	// Take input from buffer
+	Frame<INPUTS> inputFrame;
 	if (!inputBuffer.empty()) {
 		inputFrame = inputBuffer.shift();
 	}
+	else {
+		memset(&inputFrame, 0, sizeof(inputFrame));
+	}
 	for (int i = 0; i < INPUTS; i++) {
-		outputs[AUDIO_OUTPUT + i].value = 10.0 * inputFrame.samples[i];
+		outputs[AUDIO_OUTPUT + i].value = 10.f * inputFrame.samples[i];
 	}
 
-	if (audioIO.numOutputs > 0) {
+	// Outputs: rack engine -> audio engine
+	if (audioIO.active && audioIO.numOutputs > 0) {
 		// Get and push output SRC frame
 		if (!outputBuffer.full()) {
-			Frame<OUTPUTS> f;
-			for (int i = 0; i < audioIO.numOutputs; i++) {
-				f.samples[i] = inputs[AUDIO_INPUT + i].value / 10.0;
+			Frame<OUTPUTS> outputFrame;
+			for (int i = 0; i < OUTPUTS; i++) {
+				outputFrame.samples[i] = inputs[AUDIO_INPUT + i].value / 10.f;
 			}
-			outputBuffer.push(f);
+			outputBuffer.push(outputFrame);
 		}
 
 		if (outputBuffer.full()) {
-			// Wait until outputs are needed
+			// Wait until enough outputs are consumed
+			// Give up after a timeout in case the audio device is being unresponsive.
 			std::unique_lock<std::mutex> lock(audioIO.engineMutex);
 			auto cond = [&] {
-				return audioIO.outputBuffer.size() < audioIO.blockSize;
+				return (audioIO.outputBuffer.size() < (size_t) audioIO.blockSize);
 			};
-			if (audioIO.engineCv.wait_for(lock, audioTimeout, cond)) {
+			auto timeout = std::chrono::milliseconds(200);
+			if (audioIO.engineCv.wait_for(lock, timeout, cond)) {
 				// Push converted output
 				int inLen = outputBuffer.size();
 				int outLen = audioIO.outputBuffer.capacity();
@@ -199,16 +222,21 @@ void AudioInterface::step() {
 			}
 			else {
 				// Give up on pushing output
+				audioIO.active = false;
+				outputBuffer.clear();
+				debug("Audio Interface underflow");
 			}
 		}
+
+		// Notify audio thread that an output is potentially ready
+		audioIO.audioCv.notify_one();
 	}
 
+	// Turn on light if at least one port is enabled in the nearby pair
 	for (int i = 0; i < INPUTS / 2; i++)
-		lights[INPUT_LIGHT + i].value = (audioIO.numOutputs >= 2*i+1);
+		lights[INPUT_LIGHT + i].value = (audioIO.active && audioIO.numOutputs >= 2*i+1);
 	for (int i = 0; i < OUTPUTS / 2; i++)
-		lights[OUTPUT_LIGHT + i].value = (audioIO.numInputs >= 2*i+1);
-
-	audioIO.audioCv.notify_all();
+		lights[OUTPUT_LIGHT + i].value = (audioIO.active && audioIO.numInputs >= 2*i+1);
 }
 
 

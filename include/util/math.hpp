@@ -2,6 +2,7 @@
 #include "util/common.hpp"
 #include <math.h> // for global namespace functions
 #include <cmath> // for std::isfinite, etc
+#include <cstdlib> // for std::abs, etc
 
 
 // Use a few standard math functions without std::
@@ -14,22 +15,31 @@ using std::isnormal;
 namespace rack {
 
 ////////////////////
-// basic integer functions (suffixed with "i")
+// basic integer functions
 ////////////////////
 
+/** Returns the minimum of `a` and `b` */
 inline int min(int a, int b) {
 	return (a < b) ? a : b;
 }
 
+/** Returns the maximum of `a` and `b` */
 inline int max(int a, int b) {
 	return (a > b) ? a : b;
 }
 
-/** Limits a value between a minimum and maximum
-Assumes min <= max
+/** Limits `x` between `a` and `b`
+Assumes a <= b
 */
-inline int clamp(int x, int min, int max) {
-	return rack::min(rack::max(x, min), max);
+inline int clamp(int x, int a, int b) {
+	return min(max(x, a), b);
+}
+
+/** Limits `x` between `a` and `b`
+If a > b, switches the two values
+*/
+inline int clamp2(int x, int a, int b) {
+	return clamp(x, min(a, b), max(a, b));
 }
 
 /** Euclidean modulus, always returns 0 <= mod < base for positive base.
@@ -54,8 +64,32 @@ inline bool ispow2(int n) {
 }
 
 ////////////////////
-// basic float functions (suffixed with "f")
+// basic float functions
 ////////////////////
+
+/** Returns the minimum of `a` and `b` */
+inline float min(float a, float b) {
+	return (a < b) ? a : b;
+}
+
+/** Returns the maximum of `a` and `b` */
+inline float max(float a, float b) {
+	return (a > b) ? a : b;
+}
+
+/** Limits `x` between `a` and `b`
+Assumes a <= b
+*/
+inline float clamp(float x, float a, float b) {
+	return min(max(x, a), b);
+}
+
+/** Limits `x` between `a` and `b`
+If a > b, switches the two values
+*/
+inline float clamp2(float x, float a, float b) {
+	return clamp(x, min(a, b), max(a, b));
+}
 
 /** Returns 1.f for positive numbers and -1.f for negative numbers (including positive/negative zero) */
 inline float sgn(float x) {
@@ -71,27 +105,13 @@ inline bool isNear(float a, float b, float epsilon = 1.0e-6f) {
 	return fabsf(a - b) <= epsilon;
 }
 
-/** Limits a value between a minimum and maximum
-Assumes min <= max
-*/
-inline float clamp(float x, float min, float max) {
-	return fminf(fmaxf(x, min), max);
-}
-
-/** Limits a value between a min and max
-If min > max, switches the two values
-*/
-inline float clamp2(float x, float min, float max) {
-	return clamp(x, fminf(min, max), fmaxf(min, max));
-}
-
 /** If the magnitude of x if less than eps, return 0 */
 inline float chop(float x, float eps) {
 	return (-eps < x && x < eps) ? 0.0f : x;
 }
 
-inline float rescale(float x, float xMin, float xMax, float yMin, float yMax) {
-	return yMin + (x - xMin) / (xMax - xMin) * (yMax - yMin);
+inline float rescale(float x, float a, float b, float yMin, float yMax) {
+	return yMin + (x - a) / (b - a) * (yMax - yMin);
 }
 
 inline float crossfade(float a, float b, float frac) {
@@ -156,10 +176,10 @@ struct Vec {
 		return hypotf(x, y);
 	}
 	Vec min(Vec b) {
-		return Vec(fminf(x, b.x), fminf(y, b.y));
+		return Vec(rack::min(x, b.x), rack::min(y, b.y));
 	}
 	Vec max(Vec b) {
-		return Vec(fmaxf(x, b.x), fmaxf(y, b.y));
+		return Vec(rack::max(x, b.x), rack::max(y, b.y));
 	}
 	Vec round() {
 		return Vec(roundf(x), roundf(y));
@@ -190,8 +210,9 @@ struct Rect {
 
 	Rect() {}
 	Rect(Vec pos, Vec size) : pos(pos), size(size) {}
-	static Rect fromMinMax(Vec min, Vec max) {
-		return Rect(min, max.minus(min));
+	/** Constructs a Rect from the upper-left position `a` and lower-right pos `b` */
+	static Rect fromMinMax(Vec a, Vec b) {
+		return Rect(a, b.minus(a));
 	}
 
 	/** Returns whether this Rect contains an entire point, inclusive on the top/left, non-inclusive on the bottom/right */
@@ -244,16 +265,22 @@ struct Rect {
 	/** Expands this Rect to contain `other` */
 	Rect expand(Rect other) {
 		Rect r;
-		r.pos.x = fminf(pos.x, other.pos.x);
-		r.pos.y = fminf(pos.y, other.pos.y);
-		r.size.x = fmaxf(pos.x + size.x, other.pos.x + other.size.x) - r.pos.x;
-		r.size.y = fmaxf(pos.y + size.y, other.pos.y + other.size.y) - r.pos.y;
+		r.pos.x = min(pos.x, other.pos.x);
+		r.pos.y = min(pos.y, other.pos.y);
+		r.size.x = max(pos.x + size.x, other.pos.x + other.size.x) - r.pos.x;
+		r.size.y = max(pos.y + size.y, other.pos.y + other.size.y) - r.pos.y;
 		return r;
 	}
 	/** Returns a Rect with its position set to zero */
 	Rect zeroPos() {
 		Rect r;
 		r.size = size;
+		return r;
+	}
+	Rect grow(Vec delta) {
+		Rect r;
+		r.pos = pos.minus(delta);
+		r.size = size.plus(delta.mult(2.f));
 		return r;
 	}
 };
@@ -290,7 +317,7 @@ DEPRECATED inline bool nearf(float a, float b, float epsilon = 1.0e-6f) {return 
 DEPRECATED inline float clampf(float x, float min, float max) {return clamp(x, min, max);}
 DEPRECATED inline float clamp2f(float x, float min, float max) {return clamp2(x, min, max);}
 DEPRECATED inline float chopf(float x, float eps) {return chop(x, eps);}
-DEPRECATED inline float rescalef(float x, float xMin, float xMax, float yMin, float yMax) {return rescale(x, xMin, xMax, yMin, yMax);}
+DEPRECATED inline float rescalef(float x, float a, float b, float yMin, float yMax) {return rescale(x, a, b, yMin, yMax);}
 DEPRECATED inline float crossf(float a, float b, float frac) {return crossfade(a, b, frac);}
 DEPRECATED inline float interpf(const float *p, float x) {return interpolateLinear(p, x);}
 DEPRECATED inline void cmultf(float *cr, float *ci, float ar, float ai, float br, float bi) {return cmult(cr, ci, ar, ai, br, bi);}

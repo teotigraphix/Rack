@@ -1,12 +1,9 @@
 #include "Core.hpp"
 #include "midi.hpp"
+#include "dsp/digital.hpp"
 #include "dsp/filter.hpp"
 
-
-struct MidiNoteData {
-	uint8_t velocity;
-	uint8_t aftertouch;
-};
+#include <algorithm>
 
 
 struct MIDIToCVInterface : Module {
@@ -41,138 +38,24 @@ struct MIDIToCVInterface : Module {
 	ExponentialFilter modFilter;
 	uint16_t pitch = 0;
 	ExponentialFilter pitchFilter;
+	PulseGenerator startPulse;
+	PulseGenerator stopPulse;
+	PulseGenerator continuePulse;
+	PulseGenerator clockPulse;
 
-	MidiNoteData noteData[128];
+	struct NoteData {
+		uint8_t velocity = 0;
+		uint8_t aftertouch = 0;
+	};
 
-	MIDIToCVInterface() : Module(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS) {}
+	NoteData noteData[128];
+	std::vector<uint8_t> heldNotes;
+	uint8_t lastNote;
+	bool pedal;
+	bool gate;
 
-	void step() override {
-		MidiMessage msg;
-		while (midiInput.shift(&msg)) {
-			processMessage(msg);
-		}
-
-		modFilter.lambda = 100.f * engineGetSampleTime();
-		outputs[MOD_OUTPUT].value = modFilter.process(rescale(mod, 0, 127, 0.f, 10.f));
-
-		pitchFilter.lambda = 100.f * engineGetSampleTime();
-		outputs[PITCH_OUTPUT].value = pitchFilter.process(rescale(pitch, 0, 16384, -5.f, 5.f));
-
-		/*
-		if (isPortOpen()) {
-			std::vector<unsigned char> message;
-
-			// midiIn->getMessage returns empty vector if there are no messages in the queue
-			getMessage(&message);
-			if (message.size() > 0) {
-				processMidi(message);
-			}
-		}
-
-		outputs[PITCH_OUTPUT].value = ((note - 60)) / 12.0;
-
-		if (resetTrigger.process(params[RESET_PARAM].value)) {
-			resetMidi();
-			return;
-		}
-
-		lights[RESET_LIGHT].value -= lights[RESET_LIGHT].value / 0.55 / engineGetSampleRate(); // fade out light
-
-		outputs[GATE_OUTPUT].value = gate ? 10.0 : 0.0;
-		outputs[VELOCITY_OUTPUT].value = vel / 127.0 * 10.0;
-
-		int steps = int(engineGetSampleRate() / 32);
-
-		if (mod.changed) {
-			mod.tSmooth.set(outputs[MOD_OUTPUT].value, (mod.val / 127.0 * 10.0), steps);
-			mod.changed = false;
-		}
-		outputs[MOD_OUTPUT].value = mod.tSmooth.next();
-
-		if (pitchWheel.changed) {
-			pitchWheel.tSmooth.set(outputs[PITCHWHEEL_OUTPUT].value, (pitchWheel.val - 64) / 64.0 * 10.0, steps);
-			pitchWheel.changed = false;
-		}
-		outputs[PITCHWHEEL_OUTPUT].value = pitchWheel.tSmooth.next();
-
-		outputs[CHANNEL_AFTERTOUCH_OUTPUT].value = afterTouch.val / 127.0 * 10.0;
-		*/
-	}
-
-	void processMessage(MidiMessage msg) {
-		debug("MIDI: %01x %01x %02x %02x", msg.status(), msg.channel(), msg.data1, msg.data2);
-
-		switch (msg.status()) {
-			// note off
-			case 0x8: {
-				// releaseNote(msg.data1);
-			} break;
-			// note on
-			case 0x9: {
-				if (msg.data2 > 0) {
-					uint8_t note = msg.data1 & 0x7f;
-					noteData[note].velocity = msg.data2;
-					noteData[note].aftertouch = 0;
-					// pressNote(msg.data1);
-				}
-				else {
-					// For some reason, some keyboards send a "note on" event with a velocity of 0 to signal that the key has been released.
-					// releaseNote(msg.data1);
-				}
-			} break;
-			// cc
-			case 0xb: {
-				processCC(msg);
-			} break;
-			// pitch wheel
-			case 0xe: {
-				pitch = msg.data2 * 128 + msg.data1;
-			} break;
-			// channel aftertouch
-			case 0xd: {
-				// TODO This is pressure, not aftertouch.
-				// aftertouch = rescale(msg.data1, 0.f, 128.f, 0.f, 10.f);
-			} break;
-			case 0xf: {
-				processSystem(msg);
-			} break;
-			default: break;
-		}
-	}
-
-	void processCC(MidiMessage msg) {
-		switch (msg.data1) {
-			// mod
-			case 0x01: {
-				mod = msg.data2;
-			} break;
-			// sustain
-			case 0x40: {
-				// pedal = (msg.data2 >= 64);
-				// if (!pedal) {
-				// 	releaseNote(-1);
-				// }
-			} break;
-			default: break;
-		}
-	}
-
-	void processSystem(MidiMessage msg) {
-		switch (msg.channel()) {
-			case 0x8: {
-				debug("timing clock");
-			} break;
-			case 0xa: {
-				debug("start");
-			} break;
-			case 0xb: {
-				debug("continue");
-			} break;
-			case 0xc: {
-				debug("stop");
-			} break;
-			default: break;
-		}
+	MIDIToCVInterface() : Module(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS), heldNotes(128) {
+		onReset();
 	}
 
 	json_t *toJson() override {
@@ -183,43 +66,161 @@ struct MIDIToCVInterface : Module {
 
 	void fromJson(json_t *rootJ) override {
 		json_t *midiJ = json_object_get(rootJ, "midi");
-		midiInput.fromJson(midiJ);
+		if (midiJ)
+			midiInput.fromJson(midiJ);
 	}
-};
 
-
-/*
-void MIDIToCVInterface::pressNote(int note) {
-	// Remove existing similar note
-	auto it = std::find(notes.begin(), notes.end(), note);
-	if (it != notes.end())
-		notes.erase(it);
-	// Push note
-	notes.push_back(note);
-	this->note = note;
-	gate = true;
-}
-
-void MIDIToCVInterface::releaseNote(int note) {
-	// Remove the note
-	auto it = std::find(notes.begin(), notes.end(), note);
-	if (it != notes.end())
-		notes.erase(it);
-
-	if (pedal) {
-		// Don't release if pedal is held
-		gate = true;
-	} else if (!notes.empty()) {
-		// Play previous note
-		auto it2 = notes.end();
-		it2--;
-		this->note = *it2;
-		gate = true;
-	} else {
+	void onReset() override {
+		heldNotes.clear();
+		lastNote = 60;
+		pedal = false;
 		gate = false;
 	}
-}
-*/
+
+	void pressNote(uint8_t note) {
+		// Remove existing similar note
+		auto it = std::find(heldNotes.begin(), heldNotes.end(), note);
+		if (it != heldNotes.end())
+			heldNotes.erase(it);
+		// Push note
+		heldNotes.push_back(note);
+		lastNote = note;
+		gate = true;
+	}
+
+	void releaseNote(uint8_t note) {
+		// Remove the note
+		auto it = std::find(heldNotes.begin(), heldNotes.end(), note);
+		if (it != heldNotes.end())
+			heldNotes.erase(it);
+		// Hold note if pedal is pressed
+		if (pedal)
+			return;
+		// Set last note
+		if (!heldNotes.empty()) {
+			lastNote = heldNotes[heldNotes.size() - 1];
+			gate = true;
+		}
+		else {
+			gate = false;
+		}
+	}
+
+	void pressPedal() {
+		pedal = true;
+	}
+
+	void releasePedal() {
+		pedal = false;
+		releaseNote(255);
+	}
+
+	void step() override {
+		MidiMessage msg;
+		while (midiInput.shift(&msg)) {
+			processMessage(msg);
+		}
+		float deltaTime = engineGetSampleTime();
+
+		outputs[CV_OUTPUT].value = (lastNote - 60) / 12.f;
+		outputs[GATE_OUTPUT].value = gate ? 10.f : 0.f;
+		outputs[VELOCITY_OUTPUT].value = rescale(noteData[lastNote].velocity, 0, 127, 0.f, 10.f);
+		modFilter.lambda = 100.f * deltaTime;
+		outputs[MOD_OUTPUT].value = modFilter.process(rescale(mod, 0, 127, 0.f, 10.f));
+
+		pitchFilter.lambda = 100.f * deltaTime;
+		outputs[PITCH_OUTPUT].value = pitchFilter.process(rescale(pitch, 0, 16384, -5.f, 5.f));
+
+		outputs[AFTERTOUCH_OUTPUT].value = rescale(noteData[lastNote].aftertouch, 0, 127, 0.f, 10.f);
+
+		outputs[START_OUTPUT].value = startPulse.process(deltaTime) ? 10.f : 0.f;
+		outputs[STOP_OUTPUT].value = stopPulse.process(deltaTime) ? 10.f : 0.f;
+		outputs[CONTINUE_OUTPUT].value = continuePulse.process(deltaTime) ? 10.f : 0.f;
+
+		outputs[CLOCK_OUTPUT].value = clockPulse.process(deltaTime) ? 10.f : 0.f;
+		// TODO
+		outputs[CLOCK_2_OUTPUT].value = 0.f;
+		outputs[CLOCK_HALF_OUTPUT].value = 0.f;
+	}
+
+	void processMessage(MidiMessage msg) {
+		// debug("MIDI: %01x %01x %02x %02x", msg.status(), msg.channel(), msg.note(), msg.value());
+
+		switch (msg.status()) {
+			// note off
+			case 0x8: {
+				releaseNote(msg.note());
+			} break;
+			// note on
+			case 0x9: {
+				if (msg.value() > 0) {
+					noteData[msg.note()].velocity = msg.value();
+					pressNote(msg.note());
+				}
+				else {
+					// For some reason, some keyboards send a "note on" event with a velocity of 0 to signal that the key has been released.
+					releaseNote(msg.note());
+				}
+			} break;
+			// channel aftertouch
+			case 0xa: {
+				uint8_t note = msg.note();
+				noteData[note].aftertouch = msg.value();
+			} break;
+			// cc
+			case 0xb: {
+				processCC(msg);
+			} break;
+			// pitch wheel
+			case 0xe: {
+				pitch = msg.value() * 128 + msg.note();
+			} break;
+			case 0xf: {
+				processSystem(msg);
+			} break;
+			default: break;
+		}
+	}
+
+	void processCC(MidiMessage msg) {
+		switch (msg.note()) {
+			// mod
+			case 0x01: {
+				mod = msg.value();
+			} break;
+			// sustain
+			case 0x40: {
+				if (msg.value() >= 64)
+					pressPedal();
+				else
+					releasePedal();
+			} break;
+			default: break;
+		}
+	}
+
+	void processSystem(MidiMessage msg) {
+		switch (msg.channel()) {
+			// Timing
+			case 0x8: {
+				clockPulse.trigger(1e-3);
+			} break;
+			// Start
+			case 0xa: {
+				startPulse.trigger(1e-3);
+			} break;
+			// Continue
+			case 0xb: {
+				continuePulse.trigger(1e-3);
+			} break;
+			// Stop
+			case 0xc: {
+				stopPulse.trigger(1e-3);
+			} break;
+			default: break;
+		}
+	}
+};
 
 
 struct MIDIToCVInterfaceWidget : ModuleWidget {

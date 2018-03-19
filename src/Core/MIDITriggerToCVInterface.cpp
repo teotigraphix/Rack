@@ -1,57 +1,5 @@
 #include "Core.hpp"
 #include "midi.hpp"
-#include "dsp/filter.hpp"
-
-
-
-struct CcChoice : LedDisplayChoice {
-	CcChoice() {
-		box.size.y = mm2px(6.666);
-		textOffset.y -= 4;
-	}
-};
-
-
-struct CcMidiWidget : MidiWidget {
-	LedDisplaySeparator *hSeparators[4];
-	LedDisplaySeparator *vSeparators[4];
-	LedDisplayChoice *ccChoices[4][4];
-
-	CcMidiWidget() {
-		Vec pos = channelChoice->box.getBottomLeft();
-		for (int x = 1; x < 4; x++) {
-			vSeparators[x] = Widget::create<LedDisplaySeparator>(pos);
-			addChild(vSeparators[x]);
-		}
-		for (int y = 0; y < 4; y++) {
-			hSeparators[y] = Widget::create<LedDisplaySeparator>(pos);
-			addChild(hSeparators[y]);
-			for (int x = 0; x < 4; x++) {
-				CcChoice *ccChoice = Widget::create<CcChoice>(pos);
-				ccChoice->text = stringf("%d", x*4+y);
-				ccChoices[x][y] = ccChoice;
-				addChild(ccChoice);
-			}
-			pos = ccChoices[0][y]->box.getBottomLeft();
-		}
-		for (int x = 1; x < 4; x++) {
-			vSeparators[x]->box.size.y = pos.y - vSeparators[x]->box.pos.y;
-		}
-	}
-	void step() override {
-		MidiWidget::step();
-		for (int x = 1; x < 4; x++) {
-			vSeparators[x]->box.pos.x = box.size.x / 4 * x;
-		}
-		for (int y = 0; y < 4; y++) {
-			hSeparators[y]->box.size.x = box.size.x;
-			for (int x = 0; x < 4; x++) {
-				ccChoices[x][y]->box.size.x = box.size.x / 4;
-				ccChoices[x][y]->box.pos.x = box.size.x / 4 * x;
-			}
-		}
-	}
-};
 
 
 struct MIDITriggerToCVInterface : Module {
@@ -71,43 +19,177 @@ struct MIDITriggerToCVInterface : Module {
 
 	MidiInputQueue midiInput;
 
-	MIDITriggerToCVInterface() : Module(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS) {}
+	bool gates[16];
+	float gateTimes[16];
+	int learningId = -1;
+	uint8_t learnedNotes[16] = {};
+
+	MIDITriggerToCVInterface() : Module(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS) {
+		onReset();
+	}
+
+	void onReset() override {
+		for (int i = 0; i < 16; i++) {
+			gates[i] = false;
+			gateTimes[i] = 0.f;
+			learnedNotes[i] = i + 36;
+		}
+		learningId = -1;
+	}
+
+	void pressNote(uint8_t note) {
+		// Learn
+		if (learningId >= 0) {
+			learnedNotes[learningId] = note;
+			learningId = -1;
+		}
+		// Find id
+		for (int i = 0; i < 16; i++) {
+			if (learnedNotes[i] == note) {
+				gates[i] = true;
+				gateTimes[i] = 1e-3f;
+			}
+		}
+	}
+
+	void releaseNote(uint8_t note) {
+		// Find id
+		for (int i = 0; i < 16; i++) {
+			if (learnedNotes[i] == note) {
+				gates[i] = false;
+			}
+		}
+	}
 
 	void step() override {
 		MidiMessage msg;
 		while (midiInput.shift(&msg)) {
 			processMessage(msg);
 		}
+		float deltaTime = engineGetSampleTime();
 
 		for (int i = 0; i < 16; i++) {
-			outputs[TRIG_OUTPUT + i].value = 0.f;
+			if (gateTimes[i] > 0.f) {
+				outputs[TRIG_OUTPUT + i].value = 10.f;
+				// If the gate is off, wait 1 ms before turning the pulse off.
+				// This avoids drum controllers sending a pulse with 0 ms duration.
+				if (!gates[i]) {
+					gateTimes[i] -= deltaTime;
+				}
+			}
+			else {
+				outputs[TRIG_OUTPUT + i].value = 0.f;
+			}
 		}
 	}
 
 	void processMessage(MidiMessage msg) {
-		// debug("MIDI: %01x %01x %02x %02x", msg.status(), msg.channel(), msg.data1, msg.data2);
-
 		switch (msg.status()) {
+			// note off
+			case 0x8: {
+				releaseNote(msg.note());
+			} break;
+			// note on
+			case 0x9: {
+				if (msg.value() > 0) {
+					pressNote(msg.note());
+				}
+				else {
+					releaseNote(msg.note());
+				}
+			} break;
 			default: break;
 		}
 	}
 
 	json_t *toJson() override {
 		json_t *rootJ = json_object();
+
+		json_t *notesJ = json_array();
+		for (int i = 0; i < 16; i++) {
+			json_t *noteJ = json_integer(learnedNotes[i]);
+			json_array_append_new(notesJ, noteJ);
+		}
+		json_object_set_new(rootJ, "notes", notesJ);
+
 		json_object_set_new(rootJ, "midi", midiInput.toJson());
 		return rootJ;
 	}
 
 	void fromJson(json_t *rootJ) override {
+		json_t *notesJ = json_object_get(rootJ, "notes");
+		if (notesJ) {
+			for (int i = 0; i < 16; i++) {
+				json_t *noteJ = json_array_get(notesJ, i);
+				if (noteJ)
+					learnedNotes[i] = json_integer_value(noteJ) & 0x7f;
+			}
+		}
+
 		json_t *midiJ = json_object_get(rootJ, "midi");
 		midiInput.fromJson(midiJ);
 	}
 };
 
 
+struct MidiTrigChoice : GridChoice {
+	MIDITriggerToCVInterface *module;
+	int id;
+
+	MidiTrigChoice() {
+		box.size.y = mm2px(6.666);
+		textOffset.y -= 4;
+		textOffset.x -= 4;
+	}
+
+	void setId(int id) override {
+		this->id = id;
+	}
+
+	void step() override {
+		if (module->learningId == id) {
+			text = "LRN";
+			color.a = 0.5;
+		}
+		else {
+			uint8_t note = module->learnedNotes[id];
+			static const char *noteNames[] = {
+				"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+			};
+			int oct = note / 12 - 1;
+			int semi = note % 12;
+			text = stringf("%s%d", noteNames[semi], oct);
+			color.a = 1.0;
+
+			if (gFocusedWidget == this)
+				gFocusedWidget = NULL;
+		}
+	}
+
+	void onFocus(EventFocus &e) override {
+		e.consumed = true;
+		module->learningId = id;
+	}
+
+	void onDefocus(EventDefocus &e) override {
+		module->learningId = -1;
+	}
+};
+
+
+struct MidiTrigWidget : Grid16MidiWidget {
+	MIDITriggerToCVInterface *module;
+	GridChoice *createGridChoice() override {
+		MidiTrigChoice *gridChoice = new MidiTrigChoice();
+		gridChoice->module = module;
+		return gridChoice;
+	}
+};
+
+
 struct MIDITriggerToCVInterfaceWidget : ModuleWidget {
 	MIDITriggerToCVInterfaceWidget(MIDITriggerToCVInterface *module) : ModuleWidget(module) {
-		setPanel(SVG::load(assetGlobal("res/Core/MIDICCToCVInterface.svg")));
+		setPanel(SVG::load(assetGlobal("res/Core/MIDITriggerToCVInterface.svg")));
 
 		addChild(Widget::create<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
 		addChild(Widget::create<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
@@ -131,9 +213,11 @@ struct MIDITriggerToCVInterfaceWidget : ModuleWidget {
 		addOutput(Port::create<PJ301MPort>(mm2px(Vec(27.09498, 108.14429)), Port::OUTPUT, module, MIDITriggerToCVInterface::TRIG_OUTPUT + 14));
 		addOutput(Port::create<PJ301MPort>(mm2px(Vec(38.693932, 108.14429)), Port::OUTPUT, module, MIDITriggerToCVInterface::TRIG_OUTPUT + 15));
 
-		MidiWidget *midiWidget = Widget::create<CcMidiWidget>(mm2px(Vec(3.399621, 14.837339)));
+		MidiTrigWidget *midiWidget = Widget::create<MidiTrigWidget>(mm2px(Vec(3.399621, 14.837339)));
+		midiWidget->module = module;
 		midiWidget->box.size = mm2px(Vec(44, 54.667));
 		midiWidget->midiIO = &module->midiInput;
+		midiWidget->createGridChoices();
 		addChild(midiWidget);
 
 	}

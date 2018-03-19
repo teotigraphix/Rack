@@ -11,12 +11,11 @@ void MultiLightWidget::addBaseColor(NVGcolor baseColor) {
 
 void MultiLightWidget::setValues(const std::vector<float> &values) {
 	assert(values.size() == baseColors.size());
-	color = bgColor;
+	color = nvgRGBAf(0, 0, 0, 0);
 	for (size_t i = 0; i < baseColors.size(); i++) {
 		NVGcolor c = baseColors[i];
-		c = colorMinus(c, bgColor);
-		c = colorMult(c, values[i]);
-		color = colorPlus(color, c);
+		c.a *= clamp(values[i], 0.f, 1.f);
+		color = colorScreen(color, c);
 	}
 	color = colorClip(color);
 }

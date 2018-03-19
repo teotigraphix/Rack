@@ -1,6 +1,7 @@
 #include "window.hpp"
 #include "app.hpp"
 #include "asset.hpp"
+#include "util/color.hpp"
 
 #include <map>
 #include <queue>
@@ -58,37 +59,37 @@ void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods) {
 #endif
 
 	if (action == GLFW_PRESS) {
-		Widget *w = NULL;
+		gTempWidget = NULL;
 		// onMouseDown
 		{
 			EventMouseDown e;
 			e.pos = gMousePos;
 			e.button = button;
 			gScene->onMouseDown(e);
-			w = e.target;
+			gTempWidget = e.target;
 		}
 
 		if (button == GLFW_MOUSE_BUTTON_LEFT) {
-			if (w) {
+			if (gTempWidget) {
 				// onDragStart
 				EventDragStart e;
-				w->onDragStart(e);
+				gTempWidget->onDragStart(e);
 			}
-			gDraggedWidget = w;
+			gDraggedWidget = gTempWidget;
 
-			if (w != gFocusedWidget) {
+			if (gTempWidget != gFocusedWidget) {
 				if (gFocusedWidget) {
 					// onDefocus
 					EventDefocus e;
-					w->onDefocus(e);
+					gFocusedWidget->onDefocus(e);
 				}
 				gFocusedWidget = NULL;
-				if (w) {
+				if (gTempWidget) {
 					// onFocus
 					EventFocus e;
-					w->onFocus(e);
+					gTempWidget->onFocus(e);
 					if (e.consumed) {
-						gFocusedWidget = w;
+						gFocusedWidget = gTempWidget;
 					}
 				}
 			}
@@ -96,13 +97,13 @@ void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods) {
 	}
 	else if (action == GLFW_RELEASE) {
 		// onMouseUp
-		Widget *w = NULL;
+		gTempWidget = NULL;
 		{
 			EventMouseUp e;
 			e.pos = gMousePos;
 			e.button = button;
 			gScene->onMouseUp(e);
-			w = e.target;
+			gTempWidget = e.target;
 		}
 
 		if (button == GLFW_MOUSE_BUTTON_LEFT) {
@@ -110,7 +111,7 @@ void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods) {
 				// onDragDrop
 				EventDragDrop e;
 				e.origin = gDraggedWidget;
-				w->onDragDrop(e);
+				gTempWidget->onDragDrop(e);
 			}
 			// gDraggedWidget might have been set to null in the last event, recheck here
 			if (gDraggedWidget) {
@@ -168,14 +169,14 @@ void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
 
 	gMousePos = mousePos;
 
-	Widget *hovered = NULL;
+	gTempWidget = NULL;
 	// onMouseMove
 	{
 		EventMouseMove e;
 		e.pos = mousePos;
 		e.mouseRel = mouseRel;
 		gScene->onMouseMove(e);
-		hovered = e.target;
+		gTempWidget = e.target;
 	}
 
 	if (gDraggedWidget) {
@@ -184,33 +185,33 @@ void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
 		e.mouseRel = mouseRel;
 		gDraggedWidget->onDragMove(e);
 
-		if (hovered != gDragHoveredWidget) {
+		if (gTempWidget != gDragHoveredWidget) {
 			if (gDragHoveredWidget) {
 				EventDragEnter e;
 				e.origin = gDraggedWidget;
 				gDragHoveredWidget->onDragLeave(e);
 			}
-			if (hovered) {
+			gDragHoveredWidget = gTempWidget;
+			if (gDragHoveredWidget) {
 				EventDragEnter e;
 				e.origin = gDraggedWidget;
-				hovered->onDragEnter(e);
+				gDragHoveredWidget->onDragEnter(e);
 			}
-			gDragHoveredWidget = hovered;
 		}
 	}
 	else {
-		if (hovered != gHoveredWidget) {
+		if (gTempWidget != gHoveredWidget) {
 			if (gHoveredWidget) {
 				// onMouseLeave
 				EventMouseLeave e;
 				gHoveredWidget->onMouseLeave(e);
 			}
-			if (hovered) {
+			gHoveredWidget = gTempWidget;
+			if (gHoveredWidget) {
 				// onMouseEnter
 				EventMouseEnter e;
-				hovered->onMouseEnter(e);
+				gHoveredWidget->onMouseEnter(e);
 			}
-			gHoveredWidget = hovered;
 		}
 	}
 	if (glfwGetMouseButton(gWindow, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS) {
@@ -386,12 +387,7 @@ void windowInit() {
 	bndSetFont(gGuiFont->handle);
 	// bndSetIconImage(loadImage(assetGlobal("res/icons.png")));
 
-	// Blendish style
-	BNDtheme theme;
-	theme = *bndGetTheme();
-	theme.nodeTheme.nodeBackdropColor = theme.menuTheme.innerColor;
-	theme.nodeTheme.nodeBackdropColor.a = 1.0;
-	bndSetTheme(theme);
+	windowSetTheme(nvgRGB(0x33, 0x33, 0x33), nvgRGB(0xf0, 0xf0, 0xf0));
 }
 
 void windowDestroy() {
@@ -434,7 +430,10 @@ void windowRun() {
 		mouseButtonStickyPop();
 
 		// Set window title
-		std::string windowTitle = gApplicationName + " v" + gApplicationVersion;
+		std::string windowTitle;
+		windowTitle = gApplicationName;
+		windowTitle += " ";
+		windowTitle += gApplicationVersion;
 		if (!gRackWidget->lastPath.empty()) {
 			windowTitle += " - ";
 			windowTitle += extractFilename(gRackWidget->lastPath);
@@ -461,7 +460,7 @@ void windowRun() {
 		glfwGetWindowSize(gWindow, &windowWidth, &windowHeight);
 		gWindowRatio = (float)width / windowWidth;
 
-		gScene->box.size = Vec(windowWidth, windowHeight);
+		gScene->box.size = Vec(width, height).div(gPixelRatio);
 
 		// Step scene
 		gScene->step();
@@ -544,6 +543,50 @@ bool windowIsMaximized() {
 	return glfwGetWindowAttrib(gWindow, GLFW_MAXIMIZED);
 }
 
+void windowSetTheme(NVGcolor bg, NVGcolor fg) {
+	// Assume dark background and light foreground
+
+	BNDwidgetTheme w;
+	w.outlineColor = bg;
+	w.itemColor = fg;
+	w.innerColor = bg;
+	w.innerSelectedColor = colorPlus(bg, nvgRGB(0x30, 0x30, 0x30));
+	w.textColor = fg;
+	w.textSelectedColor = fg;
+	w.shadeTop = 0;
+	w.shadeDown = 0;
+
+	BNDtheme t;
+	t.backgroundColor = colorPlus(bg, nvgRGB(0x30, 0x30, 0x30));
+	t.regularTheme = w;
+	t.toolTheme = w;
+	t.radioTheme = w;
+	t.textFieldTheme = w;
+	t.optionTheme = w;
+	t.choiceTheme = w;
+	t.numberFieldTheme = w;
+	t.sliderTheme = w;
+	t.scrollBarTheme = w;
+	t.tooltipTheme = w;
+	t.menuTheme = w;
+	t.menuItemTheme = w;
+
+	t.sliderTheme.itemColor = bg;
+	t.sliderTheme.innerColor = colorPlus(bg, nvgRGB(0x50, 0x50, 0x50));
+	t.sliderTheme.innerSelectedColor = colorPlus(bg, nvgRGB(0x60, 0x60, 0x60));
+
+	t.textFieldTheme.textColor = colorMinus(bg, nvgRGB(0x20, 0x20, 0x20));
+	t.textFieldTheme.textSelectedColor = t.textFieldTheme.textColor;
+
+	t.scrollBarTheme.itemColor = colorPlus(bg, nvgRGB(0x50, 0x50, 0x50));
+	t.scrollBarTheme.innerColor = bg;
+
+	t.menuTheme.innerColor = colorMinus(bg, nvgRGB(0x10, 0x10, 0x10));
+	t.menuTheme.textColor = colorMinus(fg, nvgRGB(0x50, 0x50, 0x50));
+	t.menuTheme.textSelectedColor = t.menuTheme.textColor;
+
+	bndSetTheme(t);
+}
 
 
 ////////////////////

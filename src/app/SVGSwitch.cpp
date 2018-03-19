@@ -21,10 +21,10 @@ void SVGSwitch::addFrame(std::shared_ptr<SVG> svg) {
 void SVGSwitch::onChange(EventChange &e) {
 	assert(frames.size() > 0);
 	float valueScaled = rescale(value, minValue, maxValue, 0, frames.size() - 1);
-	int index = clamp((int) roundf(valueScaled), 0, frames.size() - 1);
+	int index = clamp((int) roundf(valueScaled), 0, (int) frames.size() - 1);
 	sw->setSVG(frames[index]);
 	dirty = true;
-	Switch::onChange(e);
+	ParamWidget::onChange(e);
 }
 
 

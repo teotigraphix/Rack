@@ -33,21 +33,21 @@ struct SequentialLayout : virtual Widget {
 
 struct Label : VirtualWidget {
 	std::string text;
+	float fontSize;
+	NVGcolor color;
 	enum Alignment {
 		LEFT_ALIGNMENT,
 		CENTER_ALIGNMENT,
 		RIGHT_ALIGNMENT,
 	};
 	Alignment alignment = LEFT_ALIGNMENT;
-	Label() {
-		box.size.y = BND_WIDGET_HEIGHT;
-	}
+
+	Label();
 	void draw(NVGcontext *vg) override;
 };
 
 struct List : OpaqueWidget {
 	void step() override;
-	void draw(NVGcontext *vg) override;
 };
 
 /** Deletes itself from parent when clicked */
@@ -183,19 +183,24 @@ struct ScrollWidget : OpaqueWidget {
 	Vec offset;
 
 	ScrollWidget();
+	void scrollTo(Rect r);
 	void draw(NVGcontext *vg) override;
 	void step() override;
 	void onMouseMove(EventMouseMove &e) override;
 	void onScroll(EventScroll &e) override;
+	void onHoverKey(EventHoverKey &e) override;
 };
 
 struct TextField : OpaqueWidget {
 	std::string text;
 	std::string placeholder;
 	bool multiline = false;
-	int begin = 0;
-	int end = 0;
-	int dragPos = 0;
+	/** The index of the text cursor */
+	int cursor = 0;
+	/** The index of the other end of the selection.
+	If nothing is selected, this is equal to `cursor`.
+	*/
+	int selection = 0;
 
 	TextField() {
 		box.size.y = BND_WIDGET_HEIGHT;

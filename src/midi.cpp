@@ -1,4 +1,5 @@
 #include "midi.hpp"
+#include "bridge.hpp"
 
 
 namespace rack {
@@ -8,10 +9,6 @@ namespace rack {
 // MidiIO
 ////////////////////
 
-MidiIO::~MidiIO() {
-	setDriver(-1);
-}
-
 std::vector<int> MidiIO::getDrivers() {
 	std::vector<RtMidi::Api> rtApis;
 	RtMidi::getCompiledApi(rtApis);
@@ -20,7 +17,8 @@ std::vector<int> MidiIO::getDrivers() {
 	for (RtMidi::Api api : rtApis) {
 		drivers.push_back((int) api);
 	}
-	// drivers.push_back(BRIDGE_DRIVER)
+	// Add fake Bridge driver
+	drivers.push_back(BRIDGE_DRIVER);
 	return drivers;
 }
 
@@ -32,7 +30,7 @@ std::string MidiIO::getDriverName(int driver) {
 		case RtMidi::UNIX_JACK: return "JACK";
 		case RtMidi::WINDOWS_MM: return "Windows MIDI";
 		case RtMidi::RTMIDI_DUMMY: return "Dummy MIDI";
-		// case BRIDGE_DRIVER: return "Bridge";
+		case BRIDGE_DRIVER: return "Bridge";
 		default: return "Unknown";
 	}
 }
@@ -41,17 +39,24 @@ int MidiIO::getDeviceCount() {
 	if (rtMidi) {
 		return rtMidi->getPortCount();
 	}
+	else if (driver == BRIDGE_DRIVER) {
+		return BRIDGE_NUM_PORTS;
+	}
 	return 0;
 }
 
 std::string MidiIO::getDeviceName(int device) {
+	if (device < 0)
+		return "";
+
 	if (rtMidi) {
-		if (device < 0)
-			return "";
 		if (device == this->device)
 			return deviceName;
 		else
 			return rtMidi->getPortName(device);
+	}
+	else if (driver == BRIDGE_DRIVER) {
+		return stringf("Port %d", device + 1);
 	}
 	return "";
 }
@@ -66,6 +71,15 @@ void MidiIO::setDevice(int device) {
 		}
 		this->device = device;
 	}
+	else if (driver == BRIDGE_DRIVER) {
+		if (device >= 0) {
+			bridgeMidiSubscribe(device, this);
+		}
+		else {
+			bridgeMidiUnsubscribe(device, this);
+		}
+		this->device = device;
+	}
 }
 
 std::string MidiIO::getChannelName(int channel) {
@@ -73,12 +87,6 @@ std::string MidiIO::getChannelName(int channel) {
 		return "All channels";
 	else
 		return stringf("Channel %d", channel + 1);
-}
-
-bool MidiIO::isActive() {
-	if (rtMidi)
-		return rtMidi->isPortOpen();
-	return false;
 }
 
 json_t *MidiIO::toJson() {
@@ -124,18 +132,23 @@ static void midiInputCallback(double timeStamp, std::vector<unsigned char> *mess
 
 	MidiInput *midiInput = (MidiInput*) userData;
 	if (!midiInput) return;
-	MidiMessage midiMessage;
+	MidiMessage msg;
 	if (message->size() >= 1)
-		midiMessage.cmd = (*message)[0];
+		msg.cmd = (*message)[0];
 	if (message->size() >= 2)
-		midiMessage.data1 = (*message)[1];
+		msg.data1 = (*message)[1];
 	if (message->size() >= 3)
-		midiMessage.data2 = (*message)[2];
-	midiInput->onMessage(midiMessage);
+		msg.data2 = (*message)[2];
+
+	midiInput->onMessage(msg);
 }
 
 MidiInput::MidiInput() {
 	setDriver(RtMidi::UNSPECIFIED);
+}
+
+MidiInput::~MidiInput() {
+	setDriver(-1);
 }
 
 void MidiInput::setDriver(int driver) {
@@ -148,12 +161,22 @@ void MidiInput::setDriver(int driver) {
 	if (driver >= 0) {
 		rtMidiIn = new RtMidiIn((RtMidi::Api) driver);
 		rtMidiIn->setCallback(midiInputCallback, this);
+		rtMidiIn->ignoreTypes(false, false, false);
 		rtMidi = rtMidiIn;
 		this->driver = rtMidiIn->getCurrentApi();
 	}
+	else if (driver == BRIDGE_DRIVER) {
+		this->driver = BRIDGE_DRIVER;
+	}
 }
 
-void MidiInputQueue::onMessage(const MidiMessage &message) {
+void MidiInputQueue::onMessage(MidiMessage message) {
+	// Filter channel
+	if (channel >= 0) {
+		if (message.status() != 0xf && message.channel() != channel)
+			return;
+	}
+
 	if ((int) queue.size() < queueSize)
 		queue.push(message);
 }
@@ -175,6 +198,10 @@ bool MidiInputQueue::shift(MidiMessage *message) {
 
 MidiOutput::MidiOutput() {
 	setDriver(RtMidi::UNSPECIFIED);
+}
+
+MidiOutput::~MidiOutput() {
+	setDriver(-1);
 }
 
 void MidiOutput::setDriver(int driver) {

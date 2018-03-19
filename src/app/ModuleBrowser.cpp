@@ -5,13 +5,16 @@
 #include <algorithm>
 
 
-#define BND_LABEL_FONT_SIZE 13
+static const float itemMargin = 2.0;
 
 
 namespace rack {
 
 
 static std::set<Model*> sFavoriteModels;
+static std::string sAuthorFilter;
+static ModelTag sTagFilter = NO_TAG;
+
 
 
 bool isMatch(std::string s, std::string search) {
@@ -26,7 +29,7 @@ static bool isModelMatch(Model *model, std::string search) {
 	std::string s;
 	s += model->plugin->slug;
 	s += " ";
-	s += model->manufacturer;
+	s += model->author;
 	s += " ";
 	s += model->name;
 	s += " ";
@@ -48,13 +51,15 @@ struct FavoriteRadioButton : RadioButton {
 
 struct SeparatorItem : OpaqueWidget {
 	SeparatorItem() {
-		box.size.y = BND_WIDGET_HEIGHT;
+		box.size.y = 2*BND_WIDGET_HEIGHT + 2*itemMargin;
 	}
 
 	void setText(std::string text) {
 		clearChildren();
-		Label *label = Widget::create<Label>(Vec(0, 0));
+		Label *label = Widget::create<Label>(Vec(0, 12 + itemMargin));
 		label->text = text;
+		label->fontSize = 20;
+		label->color.a *= 0.5;
 		addChild(label);
 	}
 };
@@ -64,7 +69,7 @@ struct BrowserListItem : OpaqueWidget {
 	bool selected = false;
 
 	BrowserListItem() {
-		box.size.y = 2 * BND_WIDGET_HEIGHT + 7;
+		box.size.y = BND_WIDGET_HEIGHT + 2*itemMargin;
 	}
 
 	void draw(NVGcontext *vg) override {
@@ -72,6 +77,8 @@ struct BrowserListItem : OpaqueWidget {
 		bndMenuItem(vg, 0.0, 0.0, box.size.x, box.size.y, state, -1, "");
 		Widget::draw(vg);
 	}
+
+	void onDragStart(EventDragStart &e) override;
 
 	void onDragDrop(EventDragDrop &e) override {
 		if (e.origin != this)
@@ -88,32 +95,37 @@ struct BrowserListItem : OpaqueWidget {
 			gScene->setOverlay(NULL);
 		}
 	}
-
-	void onMouseEnter(EventMouseEnter &e) override;
 };
-
 
 
 struct ModelItem : BrowserListItem {
 	Model *model;
-	Label *manufacturerLabel;
+	Label *authorLabel = NULL;
+
+	ModelItem() {
+		box.size.y = 2*BND_WIDGET_HEIGHT + 3*itemMargin;
+	}
 
 	void setModel(Model *model) {
 		clearChildren();
 		assert(model);
 		this->model = model;
 
-		Label *nameLabel = Widget::create<Label>(Vec(0, 0));
+		Label *nameLabel = Widget::create<Label>(Vec(0, 0 + itemMargin));
 		nameLabel->text = model->name;
 		addChild(nameLabel);
 
-		manufacturerLabel = Widget::create<Label>(Vec(0, 0));
-		manufacturerLabel->alignment = Label::RIGHT_ALIGNMENT;
-		manufacturerLabel->text = model->manufacturer;
-		addChild(manufacturerLabel);
+		// Hide author label if filtering by author
+		if (sAuthorFilter.empty()) {
+			authorLabel = Widget::create<Label>(Vec(0, 0 + itemMargin));
+			authorLabel->alignment = Label::RIGHT_ALIGNMENT;
+			authorLabel->text = model->author;
+			authorLabel->color.a = 0.5;
+			addChild(authorLabel);
+		}
 
-		SequentialLayout *layout2 = Widget::create<SequentialLayout>(Vec(7, BND_WIDGET_HEIGHT));
-		layout2->spacing = 10;
+		SequentialLayout *layout2 = Widget::create<SequentialLayout>(Vec(7, BND_WIDGET_HEIGHT + itemMargin));
+		layout2->spacing = 0;
 		addChild(layout2);
 
 		FavoriteRadioButton *favoriteButton = new FavoriteRadioButton();
@@ -132,11 +144,22 @@ struct ModelItem : BrowserListItem {
 		// 	tagButton->text = gTagNames[tag];
 		// 	layout2->addChild(tagButton);
 		// }
+
+		Label *tagsLabel = new Label();
+		tagsLabel->color.a = 0.5;
+		int i = 0;
+		for (ModelTag tag : model->tags) {
+			if (i++ > 0)
+				tagsLabel->text += ", ";
+			tagsLabel->text += gTagNames[tag];
+		}
+		layout2->addChild(tagsLabel);
 	}
 
 	void step() override {
 		BrowserListItem::step();
-		manufacturerLabel->box.size.x = box.size.x - BND_SCROLLBAR_WIDTH;
+		if (authorLabel)
+			authorLabel->box.size.x = box.size.x - BND_SCROLLBAR_WIDTH;
 	}
 
 	void onAction(EventAction &e) override {
@@ -149,18 +172,18 @@ struct ModelItem : BrowserListItem {
 };
 
 
-struct ManufacturerItem : BrowserListItem {
-	std::string manufacturer;
+struct AuthorItem : BrowserListItem {
+	std::string author;
 
-	void setManufacturer(std::string manufacturer) {
+	void setAuthor(std::string author) {
 		clearChildren();
-		this->manufacturer = manufacturer;
-		Label *manufacturerLabel = Widget::create<Label>(Vec(0, 0));
-		if (manufacturer.empty())
-			manufacturerLabel->text = "Show all modules";
+		this->author = author;
+		Label *authorLabel = Widget::create<Label>(Vec(0, 0 + itemMargin));
+		if (author.empty())
+			authorLabel->text = "Show all modules";
 		else
-			manufacturerLabel->text = manufacturer;
-		addChild(manufacturerLabel);
+			authorLabel->text = author;
+		addChild(authorLabel);
 	}
 
 	void onAction(EventAction &e) override;
@@ -173,7 +196,7 @@ struct TagItem : BrowserListItem {
 	void setTag(ModelTag tag) {
 		clearChildren();
 		this->tag = tag;
-		Label *tagLabel = Widget::create<Label>(Vec(0, 0));
+		Label *tagLabel = Widget::create<Label>(Vec(0, 0 + itemMargin));
 		if (tag == NO_TAG)
 			tagLabel->text = "Show all tags";
 		else
@@ -187,7 +210,7 @@ struct TagItem : BrowserListItem {
 
 struct ClearFilterItem : BrowserListItem {
 	ClearFilterItem() {
-		Label *label = Widget::create<Label>(Vec(0, 0));
+		Label *label = Widget::create<Label>(Vec(0, 0 + itemMargin));
 		label->text = "Clear filter";
 		addChild(label);
 	}
@@ -200,8 +223,8 @@ struct BrowserList : List {
 	int selected = 0;
 
 	void step() override {
-		// If we have zero children, this result doesn't matter anyway.
-		selected = clamp(selected, 0, children.size() - 1);
+		incrementSelection(0);
+		// Find and select item
 		int i = 0;
 		for (Widget *child : children) {
 			BrowserListItem *item = dynamic_cast<BrowserListItem*>(child);
@@ -211,6 +234,22 @@ struct BrowserList : List {
 			}
 		}
 		List::step();
+	}
+
+	void incrementSelection(int delta) {
+		selected += delta;
+		selected = clamp(selected, 0, countItems() - 1);
+	}
+
+	int countItems() {
+		int n = 0;
+		for (Widget *child : children) {
+			BrowserListItem *item = dynamic_cast<BrowserListItem*>(child);
+			if (item) {
+				n++;
+			}
+		}
+		return n;
 	}
 
 	void selectItem(Widget *w) {
@@ -240,6 +279,15 @@ struct BrowserList : List {
 		}
 		return NULL;
 	}
+
+	void scrollSelected() {
+		BrowserListItem *item = getSelectedItem();
+		if (item) {
+			ScrollWidget *parentScroll = dynamic_cast<ScrollWidget*>(parent->parent);
+			if (parentScroll)
+				parentScroll->scrollTo(item->box);
+		}
+	}
 };
 
 
@@ -256,9 +304,7 @@ struct ModuleBrowser : OpaqueWidget {
 	SearchModuleField *searchField;
 	ScrollWidget *moduleScroll;
 	BrowserList *moduleList;
-	std::string manufacturerFilter;
-	ModelTag tagFilter = NO_TAG;
-	std::set<std::string> availableManufacturers;
+	std::set<std::string> availableAuthors;
 	std::set<ModelTag> availableTags;
 
 	ModuleBrowser() {
@@ -280,12 +326,12 @@ struct ModuleBrowser : OpaqueWidget {
 		moduleScroll->container->addChild(moduleList);
 		addChild(moduleScroll);
 
-		// Collect manufacturers
+		// Collect authors
 		for (Plugin *plugin : gPlugins) {
 			for (Model *model : plugin->models) {
-				// Insert manufacturer
-				if (!model->manufacturer.empty())
-					availableManufacturers.insert(model->manufacturer);
+				// Insert author
+				if (!model->author.empty())
+					availableAuthors.insert(model->author);
 				// Insert tag
 				for (ModelTag tag : model->tags) {
 					if (tag != NO_TAG)
@@ -298,15 +344,20 @@ struct ModuleBrowser : OpaqueWidget {
 		clearSearch();
 	}
 
+	void draw(NVGcontext *vg) override {
+		bndMenuBackground(vg, 0.0, 0.0, box.size.x, box.size.y, BND_CORNER_NONE);
+		Widget::draw(vg);
+	}
+
 	void clearSearch() {
 		searchField->setText("");
 	}
 
 	bool isModelFiltered(Model *model) {
-		if (!manufacturerFilter.empty() && model->manufacturer != manufacturerFilter)
+		if (!sAuthorFilter.empty() && model->author != sAuthorFilter)
 			return false;
-		if (tagFilter != NO_TAG) {
-			auto it = std::find(model->tags.begin(), model->tags.end(), tagFilter);
+		if (sTagFilter != NO_TAG) {
+			auto it = std::find(model->tags.begin(), model->tags.end(), sTagFilter);
 			if (it == model->tags.end())
 				return false;
 		}
@@ -317,33 +368,32 @@ struct ModuleBrowser : OpaqueWidget {
 		std::string search = searchField->text;
 		moduleList->clearChildren();
 		moduleList->selected = 0;
+		bool filterPage = !(sAuthorFilter.empty() && sTagFilter == NO_TAG);
 
-		// Favorites
-		{
-			SeparatorItem *item = new SeparatorItem();
-			item->setText("Favorites");
-			moduleList->addChild(item);
-		}
-		for (Model *model : sFavoriteModels) {
-			if (isModelFiltered(model) && isModelMatch(model, search)) {
-				ModelItem *item = new ModelItem();
-				item->setModel(model);
+		if (!filterPage) {
+			// Favorites
+			if (!sFavoriteModels.empty()) {
+				SeparatorItem *item = new SeparatorItem();
+				item->setText("Favorites");
 				moduleList->addChild(item);
 			}
-		}
-
-		// Manufacturers
-		if (manufacturerFilter.empty() && tagFilter == NO_TAG) {
-			// Manufacturer items
+			for (Model *model : sFavoriteModels) {
+				if (isModelFiltered(model) && isModelMatch(model, search)) {
+					ModelItem *item = new ModelItem();
+					item->setModel(model);
+					moduleList->addChild(item);
+				}
+			}
+			// Author items
 			{
 				SeparatorItem *item = new SeparatorItem();
-				item->setText("Manufacturers");
+				item->setText("Authors");
 				moduleList->addChild(item);
 			}
-			for (std::string manufacturer : availableManufacturers) {
-				if (isMatch(manufacturer, search)) {
-					ManufacturerItem *item = new ManufacturerItem();
-					item->setManufacturer(manufacturer);
+			for (std::string author : availableAuthors) {
+				if (isMatch(author, search)) {
+					AuthorItem *item = new AuthorItem();
+					item->setAuthor(author);
 					moduleList->addChild(item);
 				}
 			}
@@ -362,17 +412,26 @@ struct ModuleBrowser : OpaqueWidget {
 			}
 		}
 		else {
+			// Clear filter
 			ClearFilterItem *item = new ClearFilterItem();
 			moduleList->addChild(item);
 		}
 
-		// Models
-		if (!manufacturerFilter.empty() || tagFilter != NO_TAG || !search.empty()) {
-			{
+		if (filterPage || !search.empty()) {
+			if (!search.empty()) {
 				SeparatorItem *item = new SeparatorItem();
 				item->setText("Modules");
 				moduleList->addChild(item);
 			}
+			else if (filterPage) {
+				SeparatorItem *item = new SeparatorItem();
+				if (!sAuthorFilter.empty())
+					item->setText(sAuthorFilter);
+				else if (sTagFilter != NO_TAG)
+					item->setText("Tag: " + gTagNames[sTagFilter]);
+				moduleList->addChild(item);
+			}
+			// Modules
 			for (Plugin *plugin : gPlugins) {
 				for (Model *model : plugin->models) {
 					if (isModelFiltered(model) && isModelMatch(model, search)) {
@@ -389,8 +448,9 @@ struct ModuleBrowser : OpaqueWidget {
 		box.pos = parent->box.size.minus(box.size).div(2).round();
 		box.pos.y = 60;
 		box.size.y = parent->box.size.y - 2 * box.pos.y;
+		moduleScroll->box.size.y = min(box.size.y - moduleScroll->box.pos.y, moduleList->box.size.y);
+		box.size.y = min(box.size.y, moduleScroll->box.getBottomRight().y);
 
-		moduleScroll->box.size.y = box.size.y - moduleScroll->box.pos.y;
 		gFocusedWidget = searchField;
 		Widget::step();
 	}
@@ -399,9 +459,9 @@ struct ModuleBrowser : OpaqueWidget {
 
 // Implementations of inline methods above
 
-void ManufacturerItem::onAction(EventAction &e) {
+void AuthorItem::onAction(EventAction &e) {
 	ModuleBrowser *moduleBrowser = getAncestorOfType<ModuleBrowser>();
-	moduleBrowser->manufacturerFilter = manufacturer;
+	sAuthorFilter = author;
 	moduleBrowser->clearSearch();
 	moduleBrowser->refreshSearch();
 	e.consumed = false;
@@ -409,7 +469,7 @@ void ManufacturerItem::onAction(EventAction &e) {
 
 void TagItem::onAction(EventAction &e) {
 	ModuleBrowser *moduleBrowser = getAncestorOfType<ModuleBrowser>();
-	moduleBrowser->tagFilter = tag;
+	sTagFilter = tag;
 	moduleBrowser->clearSearch();
 	moduleBrowser->refreshSearch();
 	e.consumed = false;
@@ -417,8 +477,8 @@ void TagItem::onAction(EventAction &e) {
 
 void ClearFilterItem::onAction(EventAction &e) {
 	ModuleBrowser *moduleBrowser = getAncestorOfType<ModuleBrowser>();
-	moduleBrowser->manufacturerFilter = "";
-	moduleBrowser->tagFilter = NO_TAG;
+	sAuthorFilter = "";
+	sTagFilter = NO_TAG;
 	moduleBrowser->clearSearch();
 	moduleBrowser->refreshSearch();
 	e.consumed = false;
@@ -441,9 +501,11 @@ void FavoriteRadioButton::onAction(EventAction &e) {
 		moduleBrowser->refreshSearch();
 }
 
-void BrowserListItem::onMouseEnter(EventMouseEnter &e) {
-	BrowserList *list = getAncestorOfType<BrowserList>();
-	list->selectItem(this);
+void BrowserListItem::onDragStart(EventDragStart &e) {
+	BrowserList *list = dynamic_cast<BrowserList*>(parent);
+	if (list) {
+		list->selectItem(this);
+	}
 }
 
 void SearchModuleField::onTextChange() {
@@ -458,11 +520,23 @@ void SearchModuleField::onKey(EventKey &e) {
 			return;
 		} break;
 		case GLFW_KEY_UP: {
-			moduleBrowser->moduleList->selected--;
+			moduleBrowser->moduleList->incrementSelection(-1);
+			moduleBrowser->moduleList->scrollSelected();
 			e.consumed = true;
 		} break;
 		case GLFW_KEY_DOWN: {
-			moduleBrowser->moduleList->selected++;
+			moduleBrowser->moduleList->incrementSelection(1);
+			moduleBrowser->moduleList->scrollSelected();
+			e.consumed = true;
+		} break;
+		case GLFW_KEY_PAGE_UP: {
+			moduleBrowser->moduleList->incrementSelection(-5);
+			moduleBrowser->moduleList->scrollSelected();
+			e.consumed = true;
+		} break;
+		case GLFW_KEY_PAGE_DOWN: {
+			moduleBrowser->moduleList->incrementSelection(5);
+			moduleBrowser->moduleList->scrollSelected();
 			e.consumed = true;
 		} break;
 		case GLFW_KEY_ENTER: {
@@ -487,6 +561,7 @@ void appModuleBrowserCreate() {
 
 	ModuleBrowser *moduleBrowser = new ModuleBrowser();
 	overlay->addChild(moduleBrowser);
+
 	gScene->setOverlay(overlay);
 }
 
